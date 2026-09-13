@@ -2,48 +2,26 @@
 
 A lightweight Google Chrome extension (Manifest V3) that adds an embedded, draggable floating queue manager to **Aristotle** (`aristotle.harmonic.fun`).
 
-It lets you queue up multiple large Markdown prompts, steps away, and automatically handles prompt submission, feed scrolling, and budget recovery while you sleep or work on other things.
+It lets you queue up multiple large Markdown prompts, step away, and automatically handles prompt submission, feed scrolling, and budget recovery.
 
 ---
 
-## What It Does
+## Features
 
-1. **Sequential Task Execution**
-   Pops prompts from the queue one-by-one. It safely writes the prompt into Aristotle’s composer, waits 1 second, and triggers the submission (via button click or synthesized `Enter` key).
+1. **Queue Runner (Controlled via Button)**
+   - Start or pause anytime via the **▶ Start Auto-Runner** button.
+   - Pops prompts from your local queue one-by-one, writes them cleanly into Aristotle's composer, waits 1 second for React DOM sync, and triggers submission.
 
-2. **Full Markdown Support (No Accidental Splitting)**
-   Each entry in the text box is treated as a single, unified Markdown message. You can include paragraphs, code blocks, bullet points, and `---` horizontal rules without worrying about your message being cut in pieces.
+2. **Always-On "OUT OF BUDGET" Auto-Recovery (No Duplication)**
+   - **Enabled Always:** Works independently of the queue button. Whether you run prompts from the queue or manually type and submit prompts directly in Aristotle, whenever an execution finishes with `OUT OF BUDGET`, the extension automatically detects it.
+   - **No Duplicated Prefixes:** Uses regex deduplication to strip any existing `continue previous task:` prefixes before prepending `continue previous task:\n<prev prompt>`. If a prompt runs out of budget multiple times in succession, it will never generate duplicated prefixes (like `continue previous task:\ncontinue previous task:`).
+   - If a queued task runs out of budget, recovery takes priority: it continues the task until completion before popping the next item in the queue.
 
-3. **Smart Idle & Busy Detection**
-   Monitors Aristotle's state by observing `[data-testid="composer.stop"]` and the composer textarea. It waits patiently until the current job finishes before typing and sending the next one.
+3. **Auto-Scroll Down While Running**
+   - While Aristotle is actively thinking/proving, the extension automatically locates the true scrollable feed container and scrolls down to the bottom every **N** seconds (configurable in the UI; default is 5 seconds).
 
-4. **React State Compatibility**
-   Uses JavaScript prototype property descriptors to dispatch native `input` and `change` events, ensuring React’s virtual DOM and underlying state stay fully in sync with the injected text.
+4. **React State Compatibility & Capture Listeners**
+   - Dispatches native property setter events for inputs and captures manual keystrokes and button clicks so `lastSentMessage` is always tracked and saved to `chrome.storage.local`.
 
-5. **Auto-Scroll Down While Running**
-   While Aristotle is generating output, the extension automatically locates the true scrollable feed container and scrolls down to the bottom every **N** seconds (configurable via the UI; default is 5 seconds).
-
-6. **Automatic "OUT OF BUDGET" Detection & Retry**
-   Once Aristotle stops running, the extension scrolls down, inspects the status banner (`border-b border-border` uppercase status label), and verifies the outcome:
-   - If the task finished with **`OUT OF BUDGET`** (or anything other than `COMPLETED`), it prepends:
-     ```text
-     continue previous task:
-     <previous message content>
-     ```
-     straight back to the **front** of the queue, resuming execution immediately on the next iteration without manual intervention.
-
-7. **Queue Persistence & UI Controls**
-   - Built with `chrome.storage.local`: your queued tasks and scroll settings survive page reloads and tab closures.
-   - Compact collapsible item previews (`expand` / `collapse`) so long Markdown messages don't overwhelm your screen.
-   - Draggable header and minimize (`_`) button to keep the UI out of the way.
-
----
-
-## File Structure
-
-```text
-aristotle-auto-queue/
-├── manifest.json      # Chrome Manifest V3 configuration
-├── content.css        # Modal window styles (dark mode UI)
-├── content.js         # Core automation loop and React interaction logic
-└── README.md          # Documentation
+5. **Queue & Message Persistence**
+   - Tasks in queue, scroll settings, and the last sent message survive tab closures and page reloads.

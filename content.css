@@ -2,8 +2,8 @@
   position: fixed;
   top: 24px;
   right: 24px;
-  width: 400px;
-  max-height: 88vh;
+  width: 420px;
+  max-height: 90vh;
   background: #121316;
   color: #e5e7eb;
   border: 1px solid #27272a;
@@ -62,16 +62,122 @@
   overflow-y: auto;
 }
 
+/* Big Action Button */
+.aq-btn-big {
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  width: 100%;
+  border-radius: 8px;
+  text-align: center;
+}
+
+/* Runner Row with Auto-scroll to the right */
+.aq-runner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: #18191e;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #27272a;
+}
+
+.aq-runner-row #aq-btn-start {
+  flex: 1;
+}
+
+.aq-autoscroll-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #a1a1aa;
+  user-select: none;
+}
+
+.aq-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.aq-interval-box {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* Card for Confirmed Last Prompt */
+.aq-card {
+  background: #0d0e11;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.aq-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #a1a1aa;
+}
+
+.aq-link-btn {
+  background: none;
+  border: none;
+  color: #60a5fa;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+
+.aq-link-btn:hover {
+  text-decoration: underline;
+}
+
+.aq-mono-area {
+  width: 100%;
+  background: #060708;
+  border: 1px solid #27272a;
+  border-radius: 6px;
+  color: #f3f4f6;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  resize: vertical;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.aq-mono-area:focus {
+  border-color: #3b82f6;
+}
+
+.aq-card-hint {
+  font-size: 10px;
+  color: #71717a;
+}
+
+/* Textarea for Manual Add to Queue */
 #aristotle-input-area {
   width: 100%;
-  height: 100px;
+  height: 80px;
   background: #090a0c;
   border: 1px solid #27272a;
   border-radius: 6px;
   color: #f3f4f6;
   padding: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
   resize: vertical;
   box-sizing: border-box;
   outline: none;
@@ -88,7 +194,6 @@
 }
 
 .aq-btn {
-  flex: 1;
   padding: 7px 10px;
   font-size: 12px;
   font-weight: 500;
@@ -109,27 +214,19 @@
 .aq-btn-danger { background: #7f1d1d; color: #fecaca; }
 .aq-btn-danger:hover { background: #991b1b; }
 
-.aq-setting-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 11px;
-  color: #a1a1aa;
-}
-
 .aq-number-input {
-  width: 48px;
+  width: 44px;
   background: #090a0c;
   border: 1px solid #27272a;
   color: #fff;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 4px;
   font-size: 11px;
   text-align: center;
 }
 
 #aq-queue-list-container {
-  max-height: 200px;
+  max-height: 180px;
   overflow-y: auto;
   border: 1px solid #27272a;
   border-radius: 6px;
