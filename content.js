@@ -57,10 +57,17 @@
   const getComposerTextarea = () => query('textarea[data-testid="composer.textarea"]');
   const getStopButton = () => query('button[data-testid="composer.stop"]');
 
-  const getSendButton = () =>
-    query('button[data-testid="composer.send"]') ||
-    query('button[data-testid="composer.submit"]') ||
-    query('button[aria-label="Send"], button[aria-label="Submit"]');
+  const getSendButton = () => {
+    return (
+      query('button[data-testid="composer.solve"]') ||
+      query('button[data-testid="composer.send"]') ||
+      query('button[data-testid="composer.submit"]') ||
+      query('button[data-testid="composer.ask"]') ||
+      query('button[aria-label="Solve"], button[aria-label="Send"], button[aria-label="Submit"]') ||
+      // Fallback: the primary action button in the composer toolbar (skipping attach-file)
+      query('.ml-auto button:not([data-testid*="attach"]):not([aria-label*="Attach"])')
+    );
+  };
 
   /**
    * Identifies whether the composer is currently set to 'ask', 'instruct', or 'unknown'
@@ -205,27 +212,54 @@
     return prompt;
   };
 
+  /**
+    * Targets specifically the status of the LAST task group in Aristotle:
+    * 1. Badge inside the last [data-feed-header]
+    * 2. "ran out of time" terminal banner in the feed
+    */
   const getLastExecutionInfo = () => {
-    const banners = queryAll(
-      'div.border-border span.font-mono.uppercase, div[class*="border-b"] span[class*="font-mono"][class*="uppercase"]'
-    );
-    if (banners.length > 0) {
-      const last = banners[banners.length - 1];
-      return {
-        element: last,
-        status: (last.textContent || '').trim().toUpperCase(),
-      };
+    // Strategy 1: Check the badge of the LAST task group header
+    const feedHeaders = queryAll('[data-feed-header]');
+    if (feedHeaders.length > 0) {
+      const lastHeader = feedHeaders[feedHeaders.length - 1];
+      const badge = query('[data-slot="tooltip-trigger"], .group\\/badge, span.uppercase', lastHeader);
+      if (badge && badge.textContent.trim()) {
+        return {
+          element: lastHeader, // Use the header element to attach data-aq-handled
+          status: badge.textContent.trim().toUpperCase(),
+        };
+      }
     }
 
-    const bodyText = (document.body?.innerText || '').toUpperCase();
-    if (bodyText.includes('OUT OF BUDGET')) return { element: null, status: 'OUT OF BUDGET' };
-    if (bodyText.includes('COMPLETED')) return { element: null, status: 'COMPLETED' };
+    // Strategy 2: Check for terminal "Aristotle ran out of time" in the feed
+    const terminalSpans = queryAll('span.text-body-md, div.text-body-md, [data-feed-item] span');
+    for (let i = terminalSpans.length - 1; i >= 0; i--) {
+      const el = terminalSpans[i];
+      if (/ran out of time/i.test(el.textContent || '')) {
+        return {
+          element: el,
+          status: 'OUT OF BUDGET',
+        };
+      }
+    }
+
+    // Strategy 3: Specific status badges (ignoring code blocks/numbers)
+    const badges = queryAll('[data-slot="tooltip-trigger"][data-variant="purple"], span.bg-purple\\/15');
+    if (badges.length > 0) {
+      const lastBadge = badges[badges.length - 1];
+      return {
+        element: lastBadge,
+        status: lastBadge.textContent.trim().toUpperCase(),
+      };
+    }
 
     return { element: null, status: 'UNKNOWN' };
   };
 
   const isOutOfBudgetStatus = (status = '') =>
-    status.includes('OUT OF BUDGET') || (!status.includes('COMPLETED') && status.includes('BUDGET'));
+    status.includes('OUT OF BUDGET') ||
+    status.includes('RAN OUT OF TIME') ||
+    (!status.includes('COMPLETED') && status.includes('BUDGET'));
 
   // =========================================================================
   // 3. Immutable State Store
@@ -301,6 +335,7 @@
       return;
     }
 
+    // Fallback if button isn't found
     textarea.focus();
     const eventInit = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
     textarea.dispatchEvent(new KeyboardEvent('keydown', eventInit));
