@@ -5,12 +5,14 @@
   "description": "Auto-queue tasks, auto-scroll feed, and auto-resume on OUT OF BUDGET for Aristotle.",
   "permissions": ["storage"],
   "host_permissions": [
-    "https://aristotle.harmonic.fun/dashboard/requests/*"
+    "https://aristotle.harmonic.fun/dashboard/requests/*",
+    "https://aristotle.harmonic.fun/projects/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://aristotle.harmonic.fun/dashboard/requests/*"
+        "https://aristotle.harmonic.fun/dashboard/requests/*",
+        "https://aristotle.harmonic.fun/projects/*"
       ],
       "css": ["content.css"],
       "js": ["content.js"],
