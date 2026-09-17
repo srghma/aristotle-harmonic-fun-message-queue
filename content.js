@@ -2,11 +2,34 @@
   'use strict';
 
   // =========================================================================
-  // 1. Pure Utilities & String Transformers
+  // 1. Functional Primitives & Combinators
   // =========================================================================
+
+  const pipe = (...fns) => (x) => fns.reduce((v, f) => f(v), x);
+
+  const curry = (fn) => {
+    const arity = fn.length;
+    return function curried(...args) {
+      return args.length >= arity
+        ? fn(...args)
+        : (...more) => curried(...args, ...more);
+    };
+  };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  const trim = (str = '') => (typeof str === 'string' ? str.trim() : '');
+  const toUpper = (str = '') => (typeof str === 'string' ? str.toUpperCase() : '');
+
+  // const prop = curry((key, obj) => obj?.[key]);
+  // const hasProp = curry((key, obj) => Boolean(obj && Object.prototype.hasOwnProperty.call(obj, key)));
+
+  // Array pure transforms
+  const append = curry((item, arr) => [...arr, item]);
+  const removeAt = curry((index, arr) => arr.filter((_, i) => i !== index));
+  const updateAt = curry((index, val, arr) => arr.map((item, i) => (i === index ? val : item)));
+
+  // String formatting
   const ESCAPE_MAP = Object.freeze({
     '&': '&amp;',
     '<': '&lt;',
@@ -18,272 +41,252 @@
   const escapeHtml = (str = '') =>
     str.replace(/[&<>"']/g, (m) => ESCAPE_MAP[m] || m);
 
-  /**
-   * Checks if a prompt has substantive instruction content.
-   * Rejects empty stubs and truncated text ending in ellipses (...).
-   */
+  // =========================================================================
+  // 2. Pure Domain Logic & Predicates
+  // =========================================================================
+
+  const calculateStats = (text = '') => ({
+    chars: text.length,
+    lines: text ? text.split(/\r\n|\r|\n/).length : 0,
+  });
+
+  const stripContinuationPrefixes = (text = '') =>
+    text.replace(/^(continue\s+previous\s+task\s*:\s*)+/i, '');
+
   const isSubstantivePrompt = (text = '') => {
     if (!text || typeof text !== 'string') return false;
-    const trimmed = text.trim();
+    const trimmed = trim(text);
     if (trimmed.endsWith('...') || trimmed.endsWith('…')) return false;
-    const stripped = trimmed
-      .replace(/^(continue\s+previous\s+task\s*:\s*)+/i, '')
-      .trim();
-    return stripped.length > 0;
+    return pipe(stripContinuationPrefixes, trim, (s) => s.length > 0)(trimmed);
   };
 
-  /**
-   * Deduplicates or prepends "continue previous task:".
-   * If already present, leaves it as is; otherwise prepends it.
-   */
   const formatContinuationMessage = (prevPrompt = '') => {
-    const trimmed = prevPrompt.trim();
-    if (!trimmed) {
-      return 'continue previous task:';
-    }
-    if (/^continue\s+previous\s+task\s*:/i.test(trimmed)) {
-      return trimmed;
-    }
+    const trimmed = trim(prevPrompt);
+    if (!trimmed) return 'continue previous task:';
+    if (/^continue\s+previous\s+task\s*:/i.test(trimmed)) return trimmed;
     return `continue previous task:\n${trimmed}`;
   };
 
-  // =========================================================================
-  // 2. Functional DOM Query Helpers (Read-Only)
-  // =========================================================================
-
-  const query = (selector, root = document) => root.querySelector(selector);
-  const queryAll = (selector, root = document) => Array.from(root.querySelectorAll(selector));
-
-  const getComposerTextarea = () => query('textarea[data-testid="composer.textarea"]');
-  const getStopButton = () => query('button[data-testid="composer.stop"]');
-
-  const getSendButton = () => {
+  const isOutOfBudgetStatus = (status = '') => {
+    const s = toUpper(status);
     return (
-      query('button[data-testid="composer.solve"]') ||
-      query('button[data-testid="composer.send"]') ||
-      query('button[data-testid="composer.submit"]') ||
-      query('button[data-testid="composer.ask"]') ||
-      query('button[aria-label="Solve"], button[aria-label="Send"], button[aria-label="Submit"]') ||
-      // Fallback: the primary action button in the composer toolbar (skipping attach-file)
-      query('.ml-auto button:not([data-testid*="attach"]):not([aria-label*="Attach"])')
+      s.includes('OUT OF BUDGET') ||
+      s.includes('RAN OUT OF TIME') ||
+      (!s.includes('COMPLETED') && s.includes('BUDGET'))
     );
   };
 
-  /**
-   * Identifies whether the composer is currently set to 'ask', 'instruct', or 'unknown'
-   * based on data-testid and aria-selected="true".
-   */
-  const getComposerMode = () => {
-    const instructTab = query('[data-testid="composer.mode-instruct"]');
-    const askTab = query('[data-testid="composer.mode-ask"]');
+  // =========================================================================
+  // 3. Declarative DOM Selectors (Pure Read queries)
+  // =========================================================================
 
-    if (instructTab && instructTab.getAttribute('aria-selected') === 'true') {
-      return 'instruct';
-    }
-    if (askTab && askTab.getAttribute('aria-selected') === 'true') {
+  const query = curry((selector, root) => root.querySelector(selector));
+  const queryAll = curry((selector, root) => Array.from(root.querySelectorAll(selector)));
+
+  const selectComposerTextarea = () => query('textarea[data-testid="composer.textarea"]', document);
+
+  const selectStopButton = () =>
+    query('button[data-testid="composer.stop"]', document) ||
+    query('button[aria-label*="Stop"]', document) ||
+    query('button[data-testid="workspace.section-stop"]', document);
+
+  const selectSendButton = () =>
+    query('button[data-testid="composer.solve"]', document) ||
+    query('button[data-testid="composer.send"]', document) ||
+    query('button[data-testid="composer.submit"]', document) ||
+    query('button[data-testid="composer.ask"]', document) ||
+    query('button[aria-label="Solve"], button[aria-label="Send"], button[aria-label="Submit"]', document) ||
+    query('.ml-auto button:not([data-testid*="attach"]):not([aria-label*="Attach"])', document);
+
+  const selectComposerMode = () => {
+    const askTab = query('[data-testid="composer.mode-ask"]', document);
+    if (askTab && (askTab.getAttribute('aria-selected') === 'true' || askTab.classList.contains('active'))) {
       return 'ask';
     }
 
-    const buttons = queryAll('button');
-    const instructBtn = buttons.find(
-      (b) => b.innerText?.trim().toUpperCase() === 'INSTRUCT' && b.getAttribute('aria-selected') === 'true'
-    );
-    if (instructBtn) return 'instruct';
-
-    const askBtn = buttons.find(
-      (b) => b.innerText?.trim().toUpperCase() === 'ASK' && b.getAttribute('aria-selected') === 'true'
+    const askBtn = queryAll('button', document).find(
+      (b) => toUpper(b.innerText).trim() === 'ASK' && b.getAttribute('aria-selected') === 'true'
     );
     if (askBtn) return 'ask';
 
-    return 'unknown';
+    const instructTab = query('[data-testid="composer.mode-instruct"]', document);
+    if (instructTab && (instructTab.getAttribute('aria-selected') === 'true' || instructTab.classList.contains('active'))) {
+      return 'instruct';
+    }
+
+    const solveBtn = query('button[data-testid="composer.solve"], button[aria-label="Solve"]', document);
+    const agentControls = query('[role="toolbar"][aria-label="Agent controls"]', document);
+    const textarea = selectComposerTextarea();
+    const hasTellAristotle = Boolean(textarea && /tell aristotle/i.test(textarea.getAttribute('aria-label') || ''));
+
+    if (solveBtn || agentControls || hasTellAristotle) return 'agent';
+    return textarea ? 'default' : 'unknown';
   };
 
-  const getScrollContainer = () => {
-    const explicit = query('[data-scrollable]');
+  const selectScrollContainer = () => {
+    const explicit = query('[data-scrollable]', document);
     if (explicit) return explicit;
 
-    const feed = query('[data-feed-group]');
-    if (feed) {
-      let parent = feed.parentElement;
-      while (parent && parent !== document.body) {
-        if (parent.scrollHeight > parent.clientHeight && parent.clientHeight > 0) {
-          return parent;
-        }
-        parent = parent.parentElement;
+    const findScrollableParent = (el) => {
+      let current = el?.parentElement;
+      while (current && current !== document.body) {
+        if (current.scrollHeight > current.clientHeight && current.clientHeight > 0) return current;
+        current = current.parentElement;
       }
-    }
+      return null;
+    };
+
+    const logParent = findScrollableParent(query('[role="log"]', document));
+    if (logParent) return logParent;
+
+    const feedParent = findScrollableParent(query('[data-feed-group]', document));
+    if (feedParent) return feedParent;
+
     return document.documentElement || document.body;
   };
 
-  /**
-   * Extracts the full text from the message container holding the copy-prompt button.
-   */
-  const extractPromptTextFromCopyButton = (copyBtn) => {
-    const wrapper = copyBtn.closest('div.relative') || copyBtn.parentElement?.parentElement;
-    if (!wrapper) return '';
+  const selectExecutionStatus = () => {
+    // Pipeline of detection strategies: first truthy match wins
+    const strategies = [
+      () => {
+        const toolbar = query('[role="toolbar"][aria-label="Agent controls"]', document);
+        const badge = toolbar ? query('.text-text-purple, [class*="text-purple"]', toolbar) : null;
+        return badge && trim(badge.textContent)
+          ? { element: badge, status: toUpper(badge.textContent).trim() }
+          : null;
+      },
+      () => {
+        const badges = queryAll('.text-text-purple, [class*="text-purple"], [data-variant="purple"], span.bg-purple\\/15', document);
+        const match = badges.reverse().find((b) => /budget|time/i.test(b.textContent || ''));
+        return match ? { element: match, status: toUpper(match.textContent).trim() } : null;
+      },
+      () => {
+        const headers = queryAll('[data-feed-header]', document);
+        const lastHeader = headers[headers.length - 1];
+        if (!lastHeader) return null;
+        const badge = query('[data-slot="tooltip-trigger"], .group\\/badge, span.uppercase, .text-text-purple', lastHeader);
+        return badge && trim(badge.textContent)
+          ? { element: lastHeader, status: toUpper(badge.textContent).trim() }
+          : null;
+      },
+      () => {
+        const spans = queryAll('span.text-body-md, div.text-body-md, [data-feed-item] span, [role="log"] span', document);
+        const match = spans.reverse().find((el) => /ran out of time|out of budget/i.test(el.textContent || ''));
+        return match ? { element: match, status: toUpper(match.textContent).trim() } : null;
+      },
+    ];
 
-    const textEl = wrapper.querySelector('.text-body-md, .whitespace-pre-wrap, [class*="whitespace-pre-wrap"]');
-    if (textEl && textEl.textContent.trim()) {
-      return textEl.textContent.trim();
+    for (const strat of strategies) {
+      const match = strat();
+      if (match) return match;
     }
-
-    const clone = wrapper.cloneNode(true);
-    clone.querySelectorAll('button, svg, [data-slot="button"]').forEach((el) => el.remove());
-    return clone.textContent.trim();
-  };
-
-  /**
-   * Scans visible DOM for actual chat messages (NOT header titles or task rename buttons).
-   */
-  const scanSubstantiveUserMessageInDOM = () => {
-    // 1. Direct copy-prompt buttons (located exclusively on user chat messages)
-    const copyBtns = queryAll('button[data-testid="log.copy-prompt"], button[aria-label="Copy prompt"], button[title="Copy prompt"]');
-    for (let i = copyBtns.length - 1; i >= 0; i--) {
-      const text = extractPromptTextFromCopyButton(copyBtns[i]);
-      if (isSubstantivePrompt(text)) {
-        return text;
-      }
-    }
-
-    // 2. Feed items containing avatar and whitespace-pre-wrap text
-    const feedItems = queryAll('[data-feed-item]');
-    for (let i = feedItems.length - 1; i >= 0; i--) {
-      const item = feedItems[i];
-      const hasAvatar = Boolean(query('[data-slot="avatar"], [data-slot="avatar-image"], img.rounded-full', item));
-      if (hasAvatar) {
-        const textDiv = query('.whitespace-pre-wrap, .text-body-md', item);
-        if (textDiv) {
-          const text = (textDiv.innerText || textDiv.textContent || '').trim();
-          if (isSubstantivePrompt(text)) {
-            return text;
-          }
-        }
-      }
-    }
-
-    return '';
-  };
-
-  /**
-   * Scans for the last user prompt message.
-   * If virtualized out of the DOM, clicks Aristotle's built-in "Scroll to top of task"
-   * jump button (log.task-jump-edge) to load the message, extracts it, and restores scroll position.
-   */
-  const findLastUserPromptInDOM = async (allowScroll = true) => {
-    // Step 1: Check if already rendered in DOM
-    let prompt = scanSubstantiveUserMessageInDOM();
-    if (prompt) return prompt;
-
-    if (!allowScroll) return '';
-
-    const container = getScrollContainer();
-    const originalScrollTop = container ? container.scrollTop : window.scrollY;
-
-    // Step 2: Click Aristotle's built-in "Scroll to top of task" button
-    const jumpButtons = queryAll('button[data-testid="log.task-jump-edge"], button[aria-label*="Scroll to top of task"], button[title*="Scroll to top of task"]');
-    if (jumpButtons.length > 0) {
-      const lastJumpBtn = jumpButtons[jumpButtons.length - 1];
-      lastJumpBtn.click();
-      await sleep(350);
-
-      prompt = scanSubstantiveUserMessageInDOM();
-      if (prompt) {
-        if (container) container.scrollTop = originalScrollTop;
-        else window.scrollTo(0, originalScrollTop);
-        return prompt;
-      }
-    }
-
-    // Step 3: Gentle scroll-up fallback if jump button did not mount the item
-    if (container && container.scrollTop > 0) {
-      let attempts = 0;
-      while (!prompt && container.scrollTop > 0 && attempts < 8) {
-        attempts++;
-        container.scrollTop = Math.max(0, container.scrollTop - container.clientHeight * 0.7);
-        await sleep(250);
-        prompt = scanSubstantiveUserMessageInDOM();
-      }
-    }
-
-    // Restore scroll position
-    if (container) container.scrollTop = originalScrollTop;
-    else window.scrollTo(0, originalScrollTop);
-
-    return prompt;
-  };
-
-  /**
-    * Targets specifically the status of the LAST task group in Aristotle:
-    * 1. Badge inside the last [data-feed-header]
-    * 2. "ran out of time" terminal banner in the feed
-    */
-  const getLastExecutionInfo = () => {
-    // Strategy 1: Check the badge of the LAST task group header
-    const feedHeaders = queryAll('[data-feed-header]');
-    if (feedHeaders.length > 0) {
-      const lastHeader = feedHeaders[feedHeaders.length - 1];
-      const badge = query('[data-slot="tooltip-trigger"], .group\\/badge, span.uppercase', lastHeader);
-      if (badge && badge.textContent.trim()) {
-        return {
-          element: lastHeader, // Use the header element to attach data-aq-handled
-          status: badge.textContent.trim().toUpperCase(),
-        };
-      }
-    }
-
-    // Strategy 2: Check for terminal "Aristotle ran out of time" in the feed
-    const terminalSpans = queryAll('span.text-body-md, div.text-body-md, [data-feed-item] span');
-    for (let i = terminalSpans.length - 1; i >= 0; i--) {
-      const el = terminalSpans[i];
-      if (/ran out of time/i.test(el.textContent || '')) {
-        return {
-          element: el,
-          status: 'OUT OF BUDGET',
-        };
-      }
-    }
-
-    // Strategy 3: Specific status badges (ignoring code blocks/numbers)
-    const badges = queryAll('[data-slot="tooltip-trigger"][data-variant="purple"], span.bg-purple\\/15');
-    if (badges.length > 0) {
-      const lastBadge = badges[badges.length - 1];
-      return {
-        element: lastBadge,
-        status: lastBadge.textContent.trim().toUpperCase(),
-      };
-    }
-
     return { element: null, status: 'UNKNOWN' };
   };
 
-  const isOutOfBudgetStatus = (status = '') =>
-    status.includes('OUT OF BUDGET') ||
-    status.includes('RAN OUT OF TIME') ||
-    (!status.includes('COMPLETED') && status.includes('BUDGET'));
+  const extractPromptTextFromButton = (copyBtn) => {
+    const wrapper = copyBtn.closest('div.relative') || copyBtn.parentElement?.parentElement;
+    if (!wrapper) return '';
+    const textEl = query('.text-body-md, .whitespace-pre-wrap, [class*="whitespace-pre-wrap"]', wrapper);
+    if (textEl && trim(textEl.textContent)) return trim(textEl.textContent);
 
-  // =========================================================================
-  // 3. Immutable State Store
-  // =========================================================================
-
-  const createStore = (initialState, subscriber = () => { }) => {
-    let state = Object.freeze({ ...initialState });
-    return {
-      getState: () => state,
-      setState: (updater) => {
-        const nextState = Object.freeze(
-          typeof updater === 'function' ? updater(state) : { ...state, ...updater }
-        );
-        if (nextState !== state) {
-          state = nextState;
-          subscriber(state);
-        }
-        return state;
-      },
-    };
+    const clone = wrapper.cloneNode(true);
+    queryAll('button, svg, [data-slot="button"]', clone).forEach((el) => el.remove());
+    return trim(clone.textContent);
   };
 
+  const scanFeedForUserPrompt = () => {
+    const copyBtns = queryAll('button[data-testid="log.copy-prompt"], button[aria-label="Copy prompt"]', document);
+    const fromCopy = copyBtns
+      .slice()
+      .reverse()
+      .map(extractPromptTextFromButton)
+      .find(isSubstantivePrompt);
+    if (fromCopy) return fromCopy;
+
+    const feedItems = queryAll('[data-feed-item]', document);
+    return feedItems
+      .slice()
+      .reverse()
+      .filter((item) => Boolean(query('[data-slot="avatar"], [data-slot="avatar-image"], img.rounded-full', item)))
+      .map((item) => trim(query('.whitespace-pre-wrap, .text-body-md', item)?.innerText || query('.whitespace-pre-wrap, .text-body-md', item)?.textContent))
+      .find(isSubstantivePrompt) || '';
+  };
+
+  const findLastPromptWithFallbackScroll = async () => {
+    const prompt = scanFeedForUserPrompt();
+    if (prompt) return prompt;
+
+    const container = selectScrollContainer();
+    const originalScrollTop = container ? container.scrollTop : window.scrollY;
+
+    const jumpButtons = queryAll('button[data-testid="log.task-jump-edge"], button[aria-label*="Scroll to top of task"]', document);
+    if (jumpButtons.length > 0) {
+      jumpButtons[jumpButtons.length - 1].click();
+      await sleep(350);
+      const scrolledPrompt = scanFeedForUserPrompt();
+      if (scrolledPrompt) {
+        if (container) container.scrollTop = originalScrollTop;
+        else window.scrollTo(0, originalScrollTop);
+        return scrolledPrompt;
+      }
+    }
+
+    if (container && container.scrollTop > 0) {
+      let attempts = 0;
+      while (attempts++ < 6 && container.scrollTop > 0) {
+        container.scrollTop = Math.max(0, container.scrollTop - container.clientHeight * 0.7);
+        await sleep(200);
+        const retryPrompt = scanFeedForUserPrompt();
+        if (retryPrompt) {
+          container.scrollTop = originalScrollTop;
+          return retryPrompt;
+        }
+      }
+    }
+
+    if (container) container.scrollTop = originalScrollTop;
+    else window.scrollTo(0, originalScrollTop);
+    return '';
+  };
+
+  // =========================================================================
+  // 4. State Architecture (Redux / Elm Pure Reducer Pattern)
+  // =========================================================================
+
+  const STORAGE_KEYS = Object.freeze({
+    QUEUE: 'aristotle_queue',
+    RUNNER_ACTIVE: 'aristotle_runner_active',
+    BUDGET_RECOVERY: 'aristotle_auto_budget_recovery',
+    AUTO_SCROLL: 'aristotle_autoscroll_enabled',
+    SCROLL_INTERVAL: 'aristotle_scroll_interval',
+    LAST_SENT: 'aristotle_last_sent_message',
+  });
+
+  const ActionTypes = Object.freeze({
+    HYDRATE_STATE: 'HYDRATE_STATE',
+    TOGGLE_RUNNER: 'TOGGLE_RUNNER',
+    SET_RUNNER_ACTIVE: 'SET_RUNNER_ACTIVE',
+    TOGGLE_BUDGET_RECOVERY: 'TOGGLE_BUDGET_RECOVERY',
+    SET_BUDGET_RECOVERY: 'SET_BUDGET_RECOVERY',
+    SET_AUTO_SCROLL: 'SET_AUTO_SCROLL',
+    SET_SCROLL_INTERVAL: 'SET_SCROLL_INTERVAL',
+    ENQUEUE_MESSAGE: 'ENQUEUE_MESSAGE',
+    UPDATE_MESSAGE: 'UPDATE_MESSAGE',
+    REMOVE_MESSAGE: 'REMOVE_MESSAGE',
+    CLEAR_QUEUE: 'CLEAR_QUEUE',
+    POP_QUEUE: 'POP_QUEUE',
+    SET_LAST_SENT: 'SET_LAST_SENT',
+    SET_COMPOSER_DRAFT: 'SET_COMPOSER_DRAFT',
+    SET_BUSY_STATE: 'SET_BUSY_STATE',
+    SET_RECOVERING_BUDGET: 'SET_RECOVERING_BUDGET',
+    SET_LAST_SCROLL_TIME: 'SET_LAST_SCROLL_TIME',
+    SET_FALLBACK_KEY: 'SET_FALLBACK_KEY',
+    OPEN_EDIT_MODAL: 'OPEN_EDIT_MODAL',
+    CLOSE_EDIT_MODAL: 'CLOSE_EDIT_MODAL',
+  });
+
   const INITIAL_STATE = Object.freeze({
-    queue: [],
+    queue: Object.freeze([]),
     isRunnerActive: false,
     autoBudgetRecoveryEnabled: true,
     autoScrollEnabled: false,
@@ -294,180 +297,349 @@
     isRecoveringBudget: false,
     lastScrollTimestamp: 0,
     handledFallbackKey: '',
+    editingIndex: null,
   });
 
-  const persistState = ({ queue, scrollIntervalSeconds, autoScrollEnabled, autoBudgetRecoveryEnabled, lastSentMessage }) => {
-    chrome?.storage?.local?.set({
-      aristotle_queue: queue,
-      aristotle_scroll_interval: scrollIntervalSeconds,
-      aristotle_autoscroll_enabled: autoScrollEnabled,
-      aristotle_auto_budget_recovery: autoBudgetRecoveryEnabled,
-      aristotle_last_sent_message: lastSentMessage,
-    });
+  const rootReducer = (state = INITIAL_STATE, action) => {
+    switch (action.type) {
+      case ActionTypes.HYDRATE_STATE:
+        return Object.freeze({ ...state, ...action.payload });
+
+      case ActionTypes.TOGGLE_RUNNER:
+        return Object.freeze({ ...state, isRunnerActive: !state.isRunnerActive });
+
+      case ActionTypes.SET_RUNNER_ACTIVE:
+        return Object.freeze({ ...state, isRunnerActive: Boolean(action.payload) });
+
+      case ActionTypes.TOGGLE_BUDGET_RECOVERY:
+        return Object.freeze({ ...state, autoBudgetRecoveryEnabled: !state.autoBudgetRecoveryEnabled });
+
+      case ActionTypes.SET_BUDGET_RECOVERY:
+        return Object.freeze({ ...state, autoBudgetRecoveryEnabled: Boolean(action.payload) });
+
+      case ActionTypes.SET_AUTO_SCROLL:
+        return Object.freeze({ ...state, autoScrollEnabled: Boolean(action.payload) });
+
+      case ActionTypes.SET_SCROLL_INTERVAL:
+        return Object.freeze({ ...state, scrollIntervalSeconds: Number(action.payload) || 5 });
+
+      case ActionTypes.ENQUEUE_MESSAGE:
+        return trim(action.payload)
+          ? Object.freeze({ ...state, queue: append(trim(action.payload), state.queue) })
+          : state;
+
+      case ActionTypes.UPDATE_MESSAGE:
+        return Object.freeze({
+          ...state,
+          queue: updateAt(action.payload.index, trim(action.payload.text), state.queue),
+        });
+
+      case ActionTypes.REMOVE_MESSAGE:
+        return Object.freeze({
+          ...state,
+          queue: removeAt(action.payload, state.queue),
+        });
+
+      case ActionTypes.CLEAR_QUEUE:
+        return Object.freeze({ ...state, queue: Object.freeze([]), isRunnerActive: false });
+
+      case ActionTypes.POP_QUEUE: {
+        const [, ...rest] = state.queue;
+        return Object.freeze({ ...state, queue: rest });
+      }
+
+      case ActionTypes.SET_LAST_SENT:
+        return Object.freeze({ ...state, lastSentMessage: action.payload, composerDraft: '' });
+
+      case ActionTypes.SET_COMPOSER_DRAFT:
+        return Object.freeze({ ...state, composerDraft: action.payload });
+
+      case ActionTypes.SET_BUSY_STATE:
+        return Object.freeze({
+          ...state,
+          isBusy: Boolean(action.payload.isBusy),
+          handledFallbackKey: action.payload.handledFallbackKey ?? state.handledFallbackKey,
+        });
+
+      case ActionTypes.SET_RECOVERING_BUDGET:
+        return Object.freeze({ ...state, isRecoveringBudget: Boolean(action.payload) });
+
+      case ActionTypes.SET_LAST_SCROLL_TIME:
+        return Object.freeze({ ...state, lastScrollTimestamp: Number(action.payload) });
+
+      case ActionTypes.SET_FALLBACK_KEY:
+        return Object.freeze({ ...state, handledFallbackKey: String(action.payload) });
+
+      case ActionTypes.OPEN_EDIT_MODAL:
+        return Object.freeze({ ...state, editingIndex: Number(action.payload) });
+
+      case ActionTypes.CLOSE_EDIT_MODAL:
+        return Object.freeze({ ...state, editingIndex: null });
+
+      default:
+        return state;
+    }
   };
 
-  const store = createStore(INITIAL_STATE, persistState);
+  const createStore = (reducer, initialState, subscriber = () => { }) => {
+    let currentState = Object.freeze({ ...initialState });
+    return {
+      getState: () => currentState,
+      dispatch: (action) => {
+        const nextState = Object.freeze(reducer(currentState, action));
+        if (nextState !== currentState) {
+          currentState = nextState;
+          subscriber(currentState, action);
+        }
+        return action;
+      },
+    };
+  };
 
   // =========================================================================
-  // 4. Side-Effecting DOM Drivers
+  // 5. Side-Effecting Drivers (I/O Boundary)
   // =========================================================================
 
-  const setNativeValue = (element, value) => {
-    const valueSetter = Object.getOwnPropertyDescriptor(element, 'value')?.set;
-    const protoSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set;
+  const persistToStorage = (state) => {
+    const payload = {
+      [STORAGE_KEYS.QUEUE]: state.queue,
+      [STORAGE_KEYS.RUNNER_ACTIVE]: state.isRunnerActive,
+      [STORAGE_KEYS.BUDGET_RECOVERY]: state.autoBudgetRecoveryEnabled,
+      [STORAGE_KEYS.AUTO_SCROLL]: state.autoScrollEnabled,
+      [STORAGE_KEYS.SCROLL_INTERVAL]: state.scrollIntervalSeconds,
+      [STORAGE_KEYS.LAST_SENT]: state.lastSentMessage,
+    };
+
+    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+      chrome.storage.local.set(payload).catch(() => { });
+    }
+    try {
+      window.localStorage.setItem('aristotle_aq_state', JSON.stringify(payload));
+    } catch (_) { }
+  };
+
+  const setNativeComposerValue = (textarea, value) => {
+    textarea.focus();
+    const valueSetter = Object.getOwnPropertyDescriptor(textarea, 'value')?.set;
+    const protoSetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), 'value')?.set;
 
     if (protoSetter && valueSetter !== protoSetter) {
-      protoSetter.call(element, value);
+      protoSetter.call(textarea, value);
     } else if (valueSetter) {
-      valueSetter.call(element, value);
+      valueSetter.call(textarea, value);
     } else {
-      element.value = value;
+      textarea.value = value;
     }
 
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
+    textarea.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    textarea.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: value }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
   };
 
-  const triggerSubmit = (textarea) => {
-    const sendBtn = getSendButton();
-    if (sendBtn && !sendBtn.disabled) {
+  const triggerComposerSubmit = (textarea) => {
+    const sendBtn = selectSendButton();
+    if (sendBtn && !sendBtn.disabled && !sendBtn.hasAttribute('data-disabled')) {
       sendBtn.click();
-      return;
+      return true;
     }
 
-    // Fallback if button isn't found
     textarea.focus();
     const eventInit = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
     textarea.dispatchEvent(new KeyboardEvent('keydown', eventInit));
     textarea.dispatchEvent(new KeyboardEvent('keypress', eventInit));
     textarea.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+    return false;
   };
 
-  const scrollFeedToBottom = () => {
-    const container = getScrollContainer();
+  const executePromptSubmission = async (textarea, message) => {
+    textarea.focus();
+    setNativeComposerValue(textarea, message);
+    await sleep(400);
+
+    const sendBtn = selectSendButton();
+    if (sendBtn && (sendBtn.disabled || sendBtn.hasAttribute('data-disabled'))) {
+      textarea.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      await sleep(300);
+    }
+    triggerComposerSubmit(textarea);
+  };
+
+  const performFeedScroll = () => {
+    const container = selectScrollContainer();
     if (container) container.scrollTop = container.scrollHeight;
     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
   };
 
-  const submitPrompt = async (textarea, message) => {
-    textarea.focus();
-    setNativeValue(textarea, message);
-    await sleep(1000);
-    triggerSubmit(textarea);
-  };
-
   // =========================================================================
-  // 5. User Input Monitoring
+  // 6. Declarative UI Component Templates & Binding
   // =========================================================================
 
-  const resolveLastPrompt = (state) =>
-    state.lastSentMessage.trim() || state.composerDraft.trim();
+  const buildModalHTML = () => `
+    <div id="aristotle-queue-header">
+      <h3><span id="aristotle-status-dot" class="idle"></span> Aristotle Auto-Queue</h3>
+      <span id="aq-toggle-min" style="cursor:pointer;color:#71717a;">_</span>
+    </div>
+    <div id="aristotle-queue-body">
+      <button id="aq-btn-toggle-budget" class="aq-btn aq-btn-big aq-btn-primary">
+        ▶ Start autosubmit "continue" on "out of budget"
+      </button>
 
-  const registerInputCaptureListeners = (onNewPromptCaptured) => {
-    document.addEventListener(
-      'input',
-      (e) => {
-        const textarea = getComposerTextarea();
-        if (e.target === textarea && textarea.value.trim()) {
-          store.setState((prev) => ({ ...prev, composerDraft: textarea.value.trim() }));
-        }
-      },
-      true
-    );
+      <div class="aq-runner-row">
+        <button id="aq-btn-start" class="aq-btn aq-btn-secondary">▶ Start Auto-Runner</button>
+        <div class="aq-autoscroll-control">
+          <label class="aq-checkbox-label">
+            <input type="checkbox" id="aq-toggle-autoscroll" />
+            <span>Auto-scroll</span>
+          </label>
+          <div class="aq-interval-box">
+            <input type="number" id="aq-scroll-interval" class="aq-number-input" value="5" min="1" max="60" /> s
+          </div>
+        </div>
+      </div>
 
-    const onCommit = () => {
-      const textarea = getComposerTextarea();
-      const text = (textarea?.value || '').trim() || store.getState().composerDraft;
-      if (text && isSubstantivePrompt(text)) {
-        store.setState((prev) => ({ ...prev, lastSentMessage: text, composerDraft: '' }));
-        if (onNewPromptCaptured) onNewPromptCaptured(text);
-      }
-    };
+      <div class="aq-card">
+        <div class="aq-card-header">
+          <span>Last User Task (Confirmed)</span>
+          <button id="aq-btn-rescan" class="aq-link-btn" title="Scan feed for last user prompt">🔄 Scan Feed</button>
+        </div>
+        <textarea id="aq-confirmed-prompt" class="aq-mono-area" rows="3" placeholder="Scanning feed or waiting for input..."></textarea>
+        <div class="aq-card-hint">Used for auto-submitting continuation when out of budget.</div>
+      </div>
 
-    document.addEventListener(
-      'keydown',
-      (e) => {
-        if (e.target === getComposerTextarea() && e.key === 'Enter' && !e.shiftKey) onCommit();
-      },
-      true
-    );
+      <textarea id="aristotle-input-area" placeholder="Paste full Markdown message here..."></textarea>
+      <div class="aq-btn-row">
+        <button id="aq-btn-add" class="aq-btn aq-btn-secondary">+ Add Message to Queue</button>
+        <button id="aq-btn-clear" class="aq-btn aq-btn-danger">Clear</button>
+      </div>
 
-    document.addEventListener(
-      'click',
-      (e) => {
-        const sendBtn = getSendButton();
-        if (sendBtn && (sendBtn === e.target || sendBtn.contains(e.target))) onCommit();
-      },
-      true
-    );
-  };
+      <div style="font-weight:600; font-size:11px; text-transform:uppercase; color:#71717a;">
+        Queue (<span id="aq-count">0</span>)
+      </div>
+      <div id="aq-queue-list-container">
+        <div id="aq-queue-list"></div>
+      </div>
 
-  // =========================================================================
-  // 6. Modal Construction & View Rendering
-  // =========================================================================
+      <div id="aq-log">Status: Idle</div>
+    </div>
+  `;
 
-  const createModalElement = () => {
+  const buildEditModalHTML = () => `
+    <div class="aq-edit-dialog">
+      <div class="aq-edit-header">
+        <div class="aq-edit-title-group">
+          <span class="aq-edit-title">Edit Queued Message</span>
+          <span id="aq-edit-badge" class="aq-badge">#1</span>
+        </div>
+        <div class="aq-edit-meta">
+          <span id="aq-edit-stats">0 chars | 0 lines</span>
+          <button id="aq-edit-close" class="aq-icon-btn" title="Close (Esc)">&times;</button>
+        </div>
+      </div>
+      <div class="aq-edit-body">
+        <textarea id="aq-edit-textarea" class="aq-edit-textarea" placeholder="Edit Markdown prompt..."></textarea>
+      </div>
+      <div class="aq-edit-footer">
+        <div class="aq-edit-shortcuts">
+          <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> to save</span>
+          <span><kbd>Esc</kbd> to cancel</span>
+        </div>
+        <div class="aq-edit-actions">
+          <button id="aq-edit-cancel" class="aq-btn aq-btn-secondary">Cancel</button>
+          <button id="aq-edit-save" class="aq-btn aq-btn-primary">Save Changes</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const mountElements = () => {
     const modal = document.createElement('div');
     modal.id = 'aristotle-queue-modal';
-    modal.innerHTML = `
-      <div id="aristotle-queue-header">
-        <h3><span id="aristotle-status-dot" class="idle"></span> Aristotle Auto-Queue</h3>
-        <span id="aq-toggle-min" style="cursor:pointer;color:#71717a;">_</span>
-      </div>
-      <div id="aristotle-queue-body">
-
-        <!-- Big Button: Start / Pause autosubmit 'continue' on 'out of budget' -->
-        <button id="aq-btn-toggle-budget" class="aq-btn aq-btn-big aq-btn-primary">
-          ▶ Start autosubmit "continue" on "out of budget"
-        </button>
-
-        <!-- Runner Controls Row: Start button on left, Auto-scroll on right -->
-        <div class="aq-runner-row">
-          <button id="aq-btn-start" class="aq-btn aq-btn-secondary">▶ Start Auto-Runner</button>
-          <div class="aq-autoscroll-control">
-            <label class="aq-checkbox-label">
-              <input type="checkbox" id="aq-toggle-autoscroll" />
-              <span>Auto-scroll</span>
-            </label>
-            <div class="aq-interval-box">
-              <input type="number" id="aq-scroll-interval" class="aq-number-input" value="5" min="1" max="60" /> s
-            </div>
-          </div>
-        </div>
-
-        <!-- Confirmed Last User Task Card -->
-        <div class="aq-card">
-          <div class="aq-card-header">
-            <span>Last User Task (Confirmed)</span>
-            <button id="aq-btn-rescan" class="aq-link-btn" title="Scan feed for last user prompt">🔄 Scan Feed</button>
-          </div>
-          <textarea id="aq-confirmed-prompt" class="aq-mono-area" rows="3" placeholder="Scanning feed or waiting for input..."></textarea>
-          <div class="aq-card-hint">Used for auto-submitting continuation when out of budget.</div>
-        </div>
-
-        <!-- Queue Input & Actions -->
-        <textarea id="aristotle-input-area" placeholder="Paste full Markdown message here..."></textarea>
-        <div class="aq-btn-row">
-          <button id="aq-btn-add" class="aq-btn aq-btn-secondary">+ Add Message to Queue</button>
-          <button id="aq-btn-clear" class="aq-btn aq-btn-danger">Clear</button>
-        </div>
-
-        <!-- Queue List -->
-        <div style="font-weight:600; font-size:11px; text-transform:uppercase; color:#71717a;">
-          Queue (<span id="aq-count">0</span>)
-        </div>
-        <div id="aq-queue-list-container">
-          <div id="aq-queue-list"></div>
-        </div>
-
-        <div id="aq-log">Status: Idle</div>
-      </div>
-    `;
+    modal.innerHTML = buildModalHTML();
     document.body.appendChild(modal);
-    return modal;
+
+    const editOverlay = document.createElement('div');
+    editOverlay.id = 'aq-edit-overlay';
+    editOverlay.className = 'aq-overlay';
+    editOverlay.style.display = 'none';
+    editOverlay.innerHTML = buildEditModalHTML();
+    document.body.appendChild(editOverlay);
+
+    return { modal, editOverlay };
   };
 
-  const bindUI = (modal) => {
+  const setupDraggable = (modal) => {
+    let offset = null;
+    const header = query('#aristotle-queue-header', modal);
+    const toggleMin = query('#aq-toggle-min', modal);
+
+    header.addEventListener('mousedown', (e) => {
+      if (e.target === toggleMin) return;
+      offset = { x: e.clientX - modal.offsetLeft, y: e.clientY - modal.offsetTop };
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!offset) return;
+      modal.style.left = `${Math.max(10, e.clientX - offset.x)}px`;
+      modal.style.top = `${Math.max(10, e.clientY - offset.y)}px`;
+      modal.style.right = 'auto';
+    });
+
+    window.addEventListener('mouseup', () => {
+      offset = null;
+    });
+  };
+
+  const renderQueueList = (container, countEl, queue, dispatch) => {
+    countEl.textContent = queue.length;
+    if (queue.length === 0) {
+      container.innerHTML = `<div style="padding: 10px; color: #52525b; text-align: center;">Queue is empty</div>`;
+      return;
+    }
+
+    container.innerHTML = queue
+      .map(
+        (text, idx) => `
+          <div class="aq-item" data-idx="${idx}">
+            <div class="aq-item-header">
+              <span style="color:#71717a; font-family:monospace;">#${idx + 1} (${text.length} chars)</span>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <span class="aq-item-edit" data-idx="${idx}" title="Edit in modal">edit</span>
+                <span class="aq-item-toggle" data-idx="${idx}">expand</span>
+                <span class="aq-item-remove" data-idx="${idx}">&times;</span>
+              </div>
+            </div>
+            <div class="aq-item-text collapsed" id="aq-text-${idx}">${escapeHtml(text)}</div>
+          </div>
+        `
+      )
+      .join('');
+
+    queryAll('.aq-item-edit', container).forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        dispatch({ type: ActionTypes.OPEN_EDIT_MODAL, payload: parseInt(e.currentTarget.dataset.idx, 10) });
+      });
+    });
+
+    queryAll('.aq-item-remove', container).forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        dispatch({ type: ActionTypes.REMOVE_MESSAGE, payload: parseInt(e.currentTarget.dataset.idx, 10) });
+      });
+    });
+
+    queryAll('.aq-item-toggle', container).forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        const textEl = query(`#aq-text-${e.currentTarget.dataset.idx}`, container);
+        const isCollapsed = textEl.classList.toggle('collapsed');
+        e.currentTarget.textContent = isCollapsed ? 'expand' : 'collapse';
+      });
+    });
+  };
+
+  const bindUI = (elements, store) => {
+    const { modal, editOverlay } = elements;
+    const { dispatch } = store;
+
+    // Element queries
     const inputArea = query('#aristotle-input-area', modal);
     const confirmedPromptInput = query('#aq-confirmed-prompt', modal);
     const rescanBtn = query('#aq-btn-rescan', modal);
@@ -484,139 +656,146 @@
     const autoScrollCheckbox = query('#aq-toggle-autoscroll', modal);
     const scrollIntervalInput = query('#aq-scroll-interval', modal);
 
+    // Edit modal elements
+    const editBadge = query('#aq-edit-badge', editOverlay);
+    const editStats = query('#aq-edit-stats', editOverlay);
+    const editTextarea = query('#aq-edit-textarea', editOverlay);
+    const editSaveBtn = query('#aq-edit-save', editOverlay);
+    const editCancelBtn = query('#aq-edit-cancel', editOverlay);
+    const editCloseBtn = query('#aq-edit-close', editOverlay);
+
+    setupDraggable(modal);
+
     const setLog = (text, statusType = 'idle') => {
       logBox.textContent = `Status: ${text}`;
       statusDot.className = statusType;
     };
 
     const updateBudgetButtonUI = (enabled) => {
-      if (enabled) {
-        budgetToggleBtn.textContent = '⏸ Pause autosubmit "continue" on "out of budget"';
-        budgetToggleBtn.classList.remove('aq-btn-primary');
-        budgetToggleBtn.classList.add('aq-btn-danger');
-      } else {
-        budgetToggleBtn.textContent = '▶ Start autosubmit "continue" on "out of budget"';
-        budgetToggleBtn.classList.remove('aq-btn-danger');
-        budgetToggleBtn.classList.add('aq-btn-primary');
-      }
+      budgetToggleBtn.textContent = enabled
+        ? '⏸ Pause autosubmit "continue" on "out of budget"'
+        : '▶ Start autosubmit "continue" on "out of budget"';
+      budgetToggleBtn.classList.toggle('aq-btn-danger', enabled);
+      budgetToggleBtn.classList.toggle('aq-btn-primary', !enabled);
     };
 
-    const renderQueue = (queue) => {
-      queueCount.textContent = queue.length;
-      if (queue.length === 0) {
-        queueList.innerHTML = `<div style="padding: 10px; color: #52525b; text-align: center;">Queue is empty</div>`;
-        return;
-      }
-
-      queueList.innerHTML = queue
-        .map(
-          (text, idx) => `
-            <div class="aq-item" data-idx="${idx}">
-              <div class="aq-item-header">
-                <span style="color:#71717a; font-family:monospace;">#${idx + 1} (${text.length} chars)</span>
-                <div style="display:flex; gap:8px;">
-                  <span class="aq-item-toggle" data-idx="${idx}">expand</span>
-                  <span class="aq-item-remove" data-idx="${idx}">&times;</span>
-                </div>
-              </div>
-              <div class="aq-item-text collapsed" id="aq-text-${idx}">${escapeHtml(text)}</div>
-            </div>
-          `
-        )
-        .join('');
-
-      queryAll('.aq-item-remove', queueList).forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-          const index = parseInt(e.target.dataset.idx, 10);
-          store.setState((prev) => ({
-            ...prev,
-            queue: prev.queue.filter((_, i) => i !== index),
-          }));
-          renderQueue(store.getState().queue);
-        });
-      });
-
-      queryAll('.aq-item-toggle', queueList).forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-          const textEl = query(`#aq-text-${e.target.dataset.idx}`, queueList);
-          const isCollapsed = textEl.classList.toggle('collapsed');
-          e.target.textContent = isCollapsed ? 'expand' : 'collapse';
-        });
-      });
+    const updateRunnerButtonUI = (active) => {
+      startBtn.textContent = active ? '⏸ Pause Auto-Runner' : '▶ Start Auto-Runner';
+      startBtn.classList.toggle('aq-btn-danger', active);
+      startBtn.classList.toggle('aq-btn-secondary', !active);
     };
 
-    confirmedPromptInput.addEventListener('input', () => {
-      const val = confirmedPromptInput.value.trim();
-      store.setState((prev) => ({ ...prev, lastSentMessage: val }));
+    const updateEditStats = (text = '') => {
+      const { chars, lines } = calculateStats(text);
+      editStats.textContent = `${chars} chars | ${lines} lines`;
+    };
+
+    const openEditDialog = (index) => {
+      const content = store.getState().queue[index] || '';
+      editBadge.textContent = `#${index + 1}`;
+      editTextarea.value = content;
+      updateEditStats(content);
+      editOverlay.style.display = 'flex';
+      setTimeout(() => editTextarea.focus(), 50);
+    };
+
+    const closeEditDialog = () => {
+      editOverlay.style.display = 'none';
+      dispatch({ type: ActionTypes.CLOSE_EDIT_MODAL });
+    };
+
+    const commitEditDialog = () => {
+      const { editingIndex } = store.getState();
+      if (editingIndex !== null) {
+        dispatch({
+          type: ActionTypes.UPDATE_MESSAGE,
+          payload: { index: editingIndex, text: editTextarea.value },
+        });
+      }
+      closeEditDialog();
+    };
+
+    // Listeners
+    editTextarea.addEventListener('input', () => updateEditStats(editTextarea.value));
+    editSaveBtn.addEventListener('click', commitEditDialog);
+    editCancelBtn.addEventListener('click', closeEditDialog);
+    editCloseBtn.addEventListener('click', closeEditDialog);
+
+    window.addEventListener('keydown', (e) => {
+      if (editOverlay.style.display === 'flex') {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeEditDialog();
+        } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          commitEditDialog();
+        }
+      }
     });
 
-    const scanAndConfirmPrompt = async () => {
+    confirmedPromptInput.addEventListener('input', () => {
+      dispatch({ type: ActionTypes.SET_LAST_SENT, payload: confirmedPromptInput.value.trim() });
+    });
+
+    const triggerScan = async () => {
       setLog('Scanning feed for last user prompt...', 'waiting');
-      const detected = await findLastUserPromptInDOM(true);
+      const detected = await findLastPromptWithFallbackScroll();
       if (detected && isSubstantivePrompt(detected)) {
         confirmedPromptInput.value = detected;
-        store.setState((prev) => ({ ...prev, lastSentMessage: detected }));
-        setLog('Found last user task. Please confirm above.', 'idle');
+        dispatch({ type: ActionTypes.SET_LAST_SENT, payload: detected });
+        setLog('Found last user task. Confirmed.', 'idle');
       } else {
-        setLog('No substantive user task found yet. Type it above or scan again.', 'idle');
+        setLog('No user task found yet. Type it above or scan again.', 'idle');
       }
     };
 
-    rescanBtn.addEventListener('click', scanAndConfirmPrompt);
+    rescanBtn.addEventListener('click', triggerScan);
 
     budgetToggleBtn.addEventListener('click', () => {
-      const nextState = !store.getState().autoBudgetRecoveryEnabled;
-      store.setState((prev) => ({ ...prev, autoBudgetRecoveryEnabled: nextState }));
-      updateBudgetButtonUI(nextState);
-      if (nextState) {
-        scanAndConfirmPrompt();
+      dispatch({ type: ActionTypes.TOGGLE_BUDGET_RECOVERY });
+      const enabled = store.getState().autoBudgetRecoveryEnabled;
+      updateBudgetButtonUI(enabled);
+      if (enabled) {
+        triggerScan();
         setLog('Autosubmit on Out of Budget: ENABLED', 'active');
       } else {
         setLog('Autosubmit on Out of Budget: PAUSED', 'idle');
       }
     });
 
+    startBtn.addEventListener('click', () => {
+      const state = store.getState();
+      if (!state.isRunnerActive && state.queue.length === 0) {
+        alert('Queue is empty! Add a message first.');
+        return;
+      }
+      dispatch({ type: ActionTypes.TOGGLE_RUNNER });
+      const active = store.getState().isRunnerActive;
+      updateRunnerButtonUI(active);
+      setLog(active ? 'Auto-Runner started' : 'Auto-Runner paused', active ? 'active' : 'idle');
+    });
+
     addBtn.addEventListener('click', () => {
-      const raw = inputArea.value.trim();
-      if (!raw) return;
-      store.setState((prev) => ({ ...prev, queue: [...prev.queue, raw] }));
+      const text = inputArea.value.trim();
+      if (!text) return;
+      dispatch({ type: ActionTypes.ENQUEUE_MESSAGE, payload: text });
       inputArea.value = '';
-      renderQueue(store.getState().queue);
     });
 
     clearBtn.addEventListener('click', () => {
       const { isRunnerActive } = store.getState();
       if (isRunnerActive && !confirm('Pause runner and clear queue?')) return;
-      if (isRunnerActive) toggleRunner();
-      store.setState((prev) => ({ ...prev, queue: [] }));
-      renderQueue([]);
+      dispatch({ type: ActionTypes.CLEAR_QUEUE });
+      updateRunnerButtonUI(false);
     });
 
-    const toggleRunner = () => {
-      const nextActive = !store.getState().isRunnerActive;
-      if (nextActive && store.getState().queue.length === 0) {
-        alert('Queue is empty! Add a message first.');
-        return;
-      }
-
-      store.setState((prev) => ({ ...prev, isRunnerActive: nextActive }));
-
-      startBtn.textContent = nextActive ? '⏸ Pause Auto-Runner' : '▶ Start Auto-Runner';
-      startBtn.classList.toggle('aq-btn-secondary', !nextActive);
-      startBtn.classList.toggle('aq-btn-danger', nextActive);
-      setLog(nextActive ? 'Auto-Runner started' : 'Auto-Runner paused', nextActive ? 'active' : 'idle');
-    };
-
-    startBtn.addEventListener('click', toggleRunner);
-
     autoScrollCheckbox.addEventListener('change', () => {
-      store.setState((prev) => ({ ...prev, autoScrollEnabled: autoScrollCheckbox.checked }));
+      dispatch({ type: ActionTypes.SET_AUTO_SCROLL, payload: autoScrollCheckbox.checked });
     });
 
     scrollIntervalInput.addEventListener('change', () => {
       const val = parseInt(scrollIntervalInput.value, 10);
-      const safeVal = !isNaN(val) && val > 0 ? val : 5;
-      store.setState((prev) => ({ ...prev, scrollIntervalSeconds: safeVal }));
+      dispatch({ type: ActionTypes.SET_SCROLL_INTERVAL, payload: !isNaN(val) && val > 0 ? val : 5 });
     });
 
     toggleMin.addEventListener('click', () => {
@@ -625,261 +804,326 @@
       toggleMin.textContent = isHidden ? '_' : '□';
     });
 
-    let dragOffset = null;
-    const header = query('#aristotle-queue-header', modal);
-    header.addEventListener('mousedown', (e) => {
-      if (e.target === toggleMin) return;
-      dragOffset = { x: e.clientX - modal.offsetLeft, y: e.clientY - modal.offsetTop };
-    });
-    window.addEventListener('mousemove', (e) => {
-      if (!dragOffset) return;
-      modal.style.left = `${Math.max(10, e.clientX - dragOffset.x)}px`;
-      modal.style.top = `${Math.max(10, e.clientY - dragOffset.y)}px`;
-      modal.style.right = 'auto';
-    });
-    window.addEventListener('mouseup', () => {
-      dragOffset = null;
-    });
-
     return {
       setLog,
-      renderQueue,
+      renderQueue: (q) => renderQueueList(queueList, queueCount, q, dispatch),
       updateBudgetButtonUI,
-      scanAndConfirmPrompt,
+      updateRunnerButtonUI,
+      triggerScan,
+      openEditDialog,
       confirmedPromptInput,
-      scrollIntervalInput,
       autoScrollCheckbox,
-      toggleRunner,
+      scrollIntervalInput,
     };
   };
 
-  // =========================================================================
-  // 7. Continuous Automation Loop
-  // =========================================================================
-
-  const monitorLoop = async (ui) => {
-    while (true) {
-      try {
-        const state = store.getState();
-        const textarea = getComposerTextarea();
-        const currentlyBusy = Boolean(getStopButton());
-
-        // 1. Aristotle working state -> auto-scroll if enabled
-        if (currentlyBusy) {
-          const now = Date.now();
-          if (state.autoScrollEnabled && now - state.lastScrollTimestamp >= state.scrollIntervalSeconds * 1000) {
-            scrollFeedToBottom();
-            store.setState((prev) => ({ ...prev, lastScrollTimestamp: now }));
-          }
-
-          if (!state.isBusy) {
-            store.setState((prev) => ({ ...prev, isBusy: true, handledFallbackKey: '' }));
-            ui.setLog(
-              state.autoScrollEnabled
-                ? 'Aristotle working... auto-scrolling'
-                : 'Aristotle working...',
-              'waiting'
-            );
-          }
-
-          await sleep(1000);
-          continue;
+  const registerInputObservers = (store, onCommit) => {
+    document.addEventListener(
+      'input',
+      (e) => {
+        const textarea = selectComposerTextarea();
+        if (e.target === textarea && textarea.value.trim()) {
+          store.dispatch({ type: ActionTypes.SET_COMPOSER_DRAFT, payload: textarea.value.trim() });
         }
+      },
+      true
+    );
 
-        // 2. Aristotle task stopped transition
-        if (state.isBusy && !currentlyBusy) {
-          store.setState((prev) => ({ ...prev, isBusy: false }));
-          ui.setLog('Task stopped. Checking outcome...', 'waiting');
-          if (state.autoScrollEnabled) {
-            scrollFeedToBottom();
-            await sleep(1500);
-            scrollFeedToBottom();
-          } else {
-            await sleep(1500);
-          }
-        }
-
-        // 3. OUT OF BUDGET Detection & Recovery (Only if enabled via big button)
-        const execInfo = getLastExecutionInfo();
-        const isBudgetExhausted = isOutOfBudgetStatus(execInfo.status);
-        const fallbackKey = `${execInfo.status}_${state.lastSentMessage}`;
-        const isAlreadyHandled = execInfo.element
-          ? execInfo.element.dataset.aqHandled === 'true'
-          : state.handledFallbackKey === fallbackKey;
-
-        if (state.autoBudgetRecoveryEnabled && isBudgetExhausted && !isAlreadyHandled && !state.isRecoveringBudget && textarea && !textarea.disabled) {
-          const mode = getComposerMode();
-
-          // Error guard: UNKNOWN composer mode
-          if (mode === 'unknown') {
-            ui.setLog('ERROR: Composer mode is UNKNOWN (neither Instruct nor Ask). Continuation aborted.', 'idle');
-            await sleep(2000);
-            continue;
-          }
-
-          // Guard: ASK mode (must NOT send continuation)
-          if (mode === 'ask') {
-            if (execInfo.element) {
-              execInfo.element.dataset.aqHandled = 'true';
-            } else {
-              store.setState((prev) => ({ ...prev, handledFallbackKey: fallbackKey }));
-            }
-            ui.setLog('OUT OF BUDGET detected, but composer is in ASK mode. Continuation skipped.', 'idle');
-            await sleep(1500);
-            continue;
-          }
-
-          // Mode is 'instruct': Proceed with continuation
-          if (execInfo.element) {
-            execInfo.element.dataset.aqHandled = 'true';
-          } else {
-            store.setState((prev) => ({ ...prev, handledFallbackKey: fallbackKey }));
-          }
-
-          store.setState((prev) => ({ ...prev, isRecoveringBudget: true }));
-          ui.setLog('OUT OF BUDGET detected in Instruct mode! Preparing continuation...', 'waiting');
-          await sleep(1200);
-
-          const basePrompt = resolveLastPrompt(state);
-          const continuationPrompt = formatContinuationMessage(basePrompt);
-
-          ui.setLog('Writing continuation task...', 'active');
-          await submitPrompt(textarea, continuationPrompt);
-
-          store.setState((prev) => ({
-            ...prev,
-            lastSentMessage: continuationPrompt,
-            composerDraft: '',
-            isRecoveringBudget: false,
-          }));
-
-          ui.confirmedPromptInput.value = continuationPrompt;
-
-          let attempts = 0;
-          while (attempts++ < 20) {
-            await sleep(500);
-            if (getStopButton()) {
-              store.setState((prev) => ({ ...prev, isBusy: true }));
-              break;
-            }
-          }
-
-          ui.setLog('Continuation task active. Running...', 'waiting');
-          continue;
-        }
-
-        if (isBudgetExhausted && !isAlreadyHandled) {
-          await sleep(1000);
-          continue;
-        }
-
-        // 4. QUEUE RUNNER: Process queued tasks (Only when enabled via button)
-        if (state.isRunnerActive) {
-          if (state.queue.length > 0) {
-            const isReady = textarea && !textarea.disabled && !getStopButton();
-            if (isReady) {
-              const [nextTask, ...remainingQueue] = state.queue;
-
-              ui.setLog(`Typing task (${state.queue.length} in queue)...`, 'active');
-              await submitPrompt(textarea, nextTask);
-
-              store.setState((prev) => ({
-                ...prev,
-                queue: remainingQueue,
-                lastSentMessage: nextTask,
-                composerDraft: '',
-              }));
-
-              ui.confirmedPromptInput.value = nextTask;
-              ui.renderQueue(remainingQueue);
-
-              let attempts = 0;
-              while (attempts++ < 20) {
-                await sleep(500);
-                if (getStopButton()) {
-                  store.setState((prev) => ({ ...prev, isBusy: true }));
-                  break;
-                }
-              }
-              continue;
-            }
-          } else {
-            ui.setLog('All tasks in queue completed!', 'active');
-            ui.toggleRunner();
-          }
-        }
-      } catch (err) {
-        console.error('[Aristotle Auto-Queue] Monitor loop error:', err);
+    const handleCommit = () => {
+      const textarea = selectComposerTextarea();
+      const text = textarea?.value?.trim() || store.getState().composerDraft;
+      if (text && isSubstantivePrompt(text)) {
+        store.dispatch({ type: ActionTypes.SET_LAST_SENT, payload: text });
+        onCommit(text);
       }
+    };
 
-      await sleep(1000);
-    }
+    document.addEventListener(
+      'keydown',
+      (e) => {
+        if (e.target === selectComposerTextarea() && e.key === 'Enter' && !e.shiftKey) {
+          handleCommit();
+        }
+      },
+      true
+    );
+
+    document.addEventListener(
+      'click',
+      (e) => {
+        const sendBtn = selectSendButton();
+        if (sendBtn && (sendBtn === e.target || sendBtn.contains(e.target))) {
+          handleCommit();
+        }
+      },
+      true
+    );
   };
 
   // =========================================================================
-  // 8. Initialization (IIFE Bootstrapper)
+  // 7. Functional Reactive Loop & Evaluators
   // =========================================================================
 
-  const init = () => {
-    const modal = createModalElement();
-    const ui = bindUI(modal);
+  const evaluateBusyPhase = async (state, store, ui) => {
+    const now = Date.now();
+    if (state.autoScrollEnabled && now - state.lastScrollTimestamp >= state.scrollIntervalSeconds * 1000) {
+      performFeedScroll();
+      store.dispatch({ type: ActionTypes.SET_LAST_SCROLL_TIME, payload: now });
+    }
 
-    registerInputCaptureListeners((newPrompt) => {
+    if (!state.isBusy) {
+      document.querySelectorAll('[data-aq-handled]').forEach((el) => {
+        delete el.dataset.aqHandled;
+      });
+      store.dispatch({
+        type: ActionTypes.SET_BUSY_STATE,
+        payload: { isBusy: true, handledFallbackKey: '' },
+      });
+      ui.setLog(state.autoScrollEnabled ? 'Aristotle working... auto-scrolling' : 'Aristotle working...', 'waiting');
+    }
+  };
+
+  const evaluateIdleTransition = async (state, store, ui) => {
+    store.dispatch({ type: ActionTypes.SET_BUSY_STATE, payload: { isBusy: false } });
+    ui.setLog('Task stopped. Checking outcome...', 'waiting');
+    if (state.autoScrollEnabled) {
+      performFeedScroll();
+      await sleep(1200);
+      performFeedScroll();
+    } else {
+      await sleep(1200);
+    }
+  };
+
+  const evaluateBudgetRecovery = async (state, store, ui, textarea) => {
+    const execInfo = selectExecutionStatus();
+    const isBudgetExhausted = isOutOfBudgetStatus(execInfo.status);
+    const fallbackKey = `${execInfo.status}_${state.lastSentMessage}`;
+    const isAlreadyHandled = execInfo.element
+      ? execInfo.element.dataset.aqHandled === 'true'
+      : state.handledFallbackKey === fallbackKey;
+
+    if (!state.autoBudgetRecoveryEnabled || !isBudgetExhausted || isAlreadyHandled || state.isRecoveringBudget) {
+      return false;
+    }
+
+    // Safety Guard: Textarea already contains non-empty user draft -> Pause!
+    const currentComposerText = trim(textarea.value);
+    if (currentComposerText.length > 0) {
+      store.dispatch({ type: ActionTypes.SET_BUDGET_RECOVERY, payload: false });
+      ui.updateBudgetButtonUI(false);
+      ui.setLog('Composer contains unsent text! Autosubmit on Out of Budget PAUSED.', 'idle');
+      return true; // Stop recovery evaluation, leave task unhandled
+    }
+
+    const mode = selectComposerMode();
+    if (mode === 'ask') {
+      if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
+      else store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
+      ui.setLog('OUT OF BUDGET detected, but composer is in ASK mode. Continuation skipped.', 'idle');
+      return true;
+    }
+
+    // Flag handled
+    if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
+    else store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
+
+    store.dispatch({ type: ActionTypes.SET_RECOVERING_BUDGET, payload: true });
+    ui.setLog('OUT OF BUDGET detected! Submitting continuation...', 'waiting');
+    await sleep(800);
+
+    const basePrompt = state.lastSentMessage.trim() || state.composerDraft.trim();
+    const continuationPrompt = formatContinuationMessage(basePrompt);
+
+    await executePromptSubmission(textarea, continuationPrompt);
+
+    store.dispatch({ type: ActionTypes.SET_LAST_SENT, payload: continuationPrompt });
+    store.dispatch({ type: ActionTypes.SET_RECOVERING_BUDGET, payload: false });
+    ui.confirmedPromptInput.value = continuationPrompt;
+
+    let attempts = 0;
+    while (attempts++ < 20) {
+      await sleep(400);
+      if (selectStopButton()) {
+        store.dispatch({ type: ActionTypes.SET_BUSY_STATE, payload: { isBusy: true } });
+        break;
+      }
+    }
+
+    ui.setLog('Continuation active. Proving/Solving...', 'waiting');
+    return true;
+  };
+
+  const evaluateQueueRunner = async (state, store, ui, textarea) => {
+    if (!state.isRunnerActive) return;
+
+    if (state.queue.length === 0) {
+      ui.setLog('All tasks in queue completed!', 'active');
+      store.dispatch({ type: ActionTypes.SET_RUNNER_ACTIVE, payload: false });
+      ui.updateRunnerButtonUI(false);
+      return;
+    }
+
+    const isReady = textarea && !textarea.disabled && !selectStopButton();
+    if (!isReady) return;
+
+    // Safety Guard: Pause runner if composer has manual draft
+    const currentComposerText = trim(textarea.value);
+    if (currentComposerText.length > 0) {
+      store.dispatch({ type: ActionTypes.SET_RUNNER_ACTIVE, payload: false });
+      ui.updateRunnerButtonUI(false);
+      ui.setLog('Composer contains unsent text! Auto-Runner PAUSED.', 'idle');
+      return;
+    }
+
+    const [nextTask] = state.queue;
+    ui.setLog(`Typing queued task (${state.queue.length} in queue)...`, 'active');
+    await executePromptSubmission(textarea, nextTask);
+
+    store.dispatch({ type: ActionTypes.POP_QUEUE });
+    store.dispatch({ type: ActionTypes.SET_LAST_SENT, payload: nextTask });
+    ui.confirmedPromptInput.value = nextTask;
+
+    let attempts = 0;
+    while (attempts++ < 20) {
+      await sleep(400);
+      if (selectStopButton()) {
+        store.dispatch({ type: ActionTypes.SET_BUSY_STATE, payload: { isBusy: true } });
+        break;
+      }
+    }
+  };
+
+  const runAutomationTick = async (store, ui) => {
+    const state = store.getState();
+    const textarea = selectComposerTextarea();
+    const isBusy = Boolean(selectStopButton());
+
+    // 1. Aristotle Active
+    if (isBusy) {
+      await evaluateBusyPhase(state, store, ui);
+      return;
+    }
+
+    // 2. Transition from Busy -> Idle
+    if (state.isBusy && !isBusy) {
+      await evaluateIdleTransition(state, store, ui);
+      return;
+    }
+
+    // 3. Out of Budget Recovery Check
+    if (textarea && !textarea.disabled) {
+      const didRecover = await evaluateBudgetRecovery(state, store, ui, textarea);
+      if (didRecover) return;
+    }
+
+    // 4. Queue Runner Step Check
+    if (textarea && !textarea.disabled) {
+      await evaluateQueueRunner(state, store, ui, textarea);
+    }
+  };
+
+  const startContinuousLoop = (store, ui) => {
+    const loop = async () => {
+      try {
+        await runAutomationTick(store, ui);
+      } catch (err) {
+        console.error('[Aristotle Auto-Queue] Step error:', err);
+      }
+      setTimeout(loop, 1000);
+    };
+    loop();
+  };
+
+  // =========================================================================
+  // 8. Bootstrap & Hydration
+  // =========================================================================
+
+  const hydrateState = (raw = {}) => {
+    const autoScroll = typeof raw[STORAGE_KEYS.AUTO_SCROLL] === 'boolean' ? raw[STORAGE_KEYS.AUTO_SCROLL] : false;
+    const autoBudget = typeof raw[STORAGE_KEYS.BUDGET_RECOVERY] === 'boolean' ? raw[STORAGE_KEYS.BUDGET_RECOVERY] : true;
+    const runnerActive = typeof raw[STORAGE_KEYS.RUNNER_ACTIVE] === 'boolean' ? raw[STORAGE_KEYS.RUNNER_ACTIVE] : false;
+    const storedLastPrompt = raw[STORAGE_KEYS.LAST_SENT] || '';
+    const hasSubstantive = isSubstantivePrompt(storedLastPrompt);
+    const queue = Array.isArray(raw[STORAGE_KEYS.QUEUE]) ? raw[STORAGE_KEYS.QUEUE] : [];
+    const interval = raw[STORAGE_KEYS.SCROLL_INTERVAL] || 5;
+
+    return {
+      queue: Object.freeze(queue),
+      scrollIntervalSeconds: interval,
+      autoScrollEnabled: autoScroll,
+      autoBudgetRecoveryEnabled: autoBudget,
+      isRunnerActive: runnerActive && queue.length > 0,
+      lastSentMessage: hasSubstantive ? storedLastPrompt : '',
+    };
+  };
+
+  const init = () => {
+    const elements = mountElements();
+    let ui = null;
+
+    const store = createStore(rootReducer, INITIAL_STATE, (nextState, action) => {
+      persistToStorage(nextState);
+      if (ui) {
+        // Reactive UI updates on specific action dispatches
+        if ([ActionTypes.ENQUEUE_MESSAGE, ActionTypes.UPDATE_MESSAGE, ActionTypes.REMOVE_MESSAGE, ActionTypes.CLEAR_QUEUE, ActionTypes.POP_QUEUE, ActionTypes.HYDRATE_STATE].includes(action.type)) {
+          ui.renderQueue(nextState.queue);
+        }
+        if (action.type === ActionTypes.OPEN_EDIT_MODAL) {
+          ui.openEditDialog(action.payload);
+        }
+      }
+    });
+
+    ui = bindUI(elements, store);
+
+    registerInputObservers(store, (newPrompt) => {
       ui.confirmedPromptInput.value = newPrompt;
     });
 
-    chrome?.storage?.local?.get(
-      [
-        'aristotle_queue',
-        'aristotle_scroll_interval',
-        'aristotle_autoscroll_enabled',
-        'aristotle_auto_budget_recovery',
-        'aristotle_last_sent_message',
-      ],
-      async (res) => {
-        const autoScroll = typeof res?.aristotle_autoscroll_enabled === 'boolean'
-          ? res.aristotle_autoscroll_enabled
-          : false;
+    const bootWithData = async (data) => {
+      const hydrated = hydrateState(data);
+      store.dispatch({ type: ActionTypes.HYDRATE_STATE, payload: hydrated });
 
-        const autoBudget = typeof res?.aristotle_auto_budget_recovery === 'boolean'
-          ? res.aristotle_auto_budget_recovery
-          : true;
+      ui.autoScrollCheckbox.checked = hydrated.autoScrollEnabled;
+      ui.scrollIntervalInput.value = hydrated.scrollIntervalSeconds;
+      ui.updateBudgetButtonUI(hydrated.autoBudgetRecoveryEnabled);
+      ui.updateRunnerButtonUI(hydrated.isRunnerActive);
+      ui.renderQueue(hydrated.queue);
 
-        const storedLastPrompt = res?.aristotle_last_sent_message || '';
-        const hasSubstantiveStored = isSubstantivePrompt(storedLastPrompt);
-
-        store.setState((prev) => ({
-          ...prev,
-          queue: Array.isArray(res?.aristotle_queue) ? res.aristotle_queue : prev.queue,
-          scrollIntervalSeconds: res?.aristotle_scroll_interval || prev.scrollIntervalSeconds,
-          autoScrollEnabled: autoScroll,
-          autoBudgetRecoveryEnabled: autoBudget,
-          lastSentMessage: hasSubstantiveStored ? storedLastPrompt : '',
-        }));
-
-        ui.autoScrollCheckbox.checked = autoScroll;
-        ui.scrollIntervalInput.value = store.getState().scrollIntervalSeconds;
-        ui.updateBudgetButtonUI(autoBudget);
-        ui.renderQueue(store.getState().queue);
-
-        if (hasSubstantiveStored) {
-          ui.confirmedPromptInput.value = storedLastPrompt;
-        }
-
-        // On entry: scan feed for the last substantive task
-        if (autoBudget) {
-          await sleep(600);
-          await ui.scanAndConfirmPrompt();
-
-          if (!isSubstantivePrompt(store.getState().lastSentMessage)) {
-            await sleep(1500);
-            await ui.scanAndConfirmPrompt();
-          }
-        }
-
-        monitorLoop(ui);
+      if (hydrated.lastSentMessage) {
+        ui.confirmedPromptInput.value = hydrated.lastSentMessage;
       }
-    );
+
+      if (hydrated.autoBudgetRecoveryEnabled) {
+        await sleep(500);
+        await ui.triggerScan();
+      }
+
+      startContinuousLoop(store, ui);
+    };
+
+    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+      chrome.storage.local.get(Object.values(STORAGE_KEYS), (res) => {
+        if (chrome.runtime.lastError || !res || Object.keys(res).length === 0) {
+          try {
+            const raw = window.localStorage.getItem('aristotle_aq_state');
+            bootWithData(raw ? JSON.parse(raw) : {});
+          } catch (_) {
+            bootWithData({});
+          }
+        } else {
+          bootWithData(res);
+        }
+      });
+    } else {
+      try {
+        const raw = window.localStorage.getItem('aristotle_aq_state');
+        bootWithData(raw ? JSON.parse(raw) : {});
+      } catch (_) {
+        bootWithData({});
+      }
+    }
   };
 
   init();
