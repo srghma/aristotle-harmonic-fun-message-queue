@@ -21,9 +21,6 @@
   const trim = (str = '') => (typeof str === 'string' ? str.trim() : '');
   const toUpper = (str = '') => (typeof str === 'string' ? str.toUpperCase() : '');
 
-  // const prop = curry((key, obj) => obj?.[key]);
-  // const hasProp = curry((key, obj) => Boolean(obj && Object.prototype.hasOwnProperty.call(obj, key)));
-
   // Array pure transforms
   const append = curry((item, arr) => [...arr, item]);
   const removeAt = curry((index, arr) => arr.filter((_, i) => i !== index));
@@ -146,7 +143,6 @@
   };
 
   const selectExecutionStatus = () => {
-    // Pipeline of detection strategies: first truthy match wins
     const strategies = [
       () => {
         const toolbar = query('[role="toolbar"][aria-label="Agent controls"]', document);
@@ -204,12 +200,14 @@
     if (fromCopy) return fromCopy;
 
     const feedItems = queryAll('[data-feed-item]', document);
-    return feedItems
-      .slice()
-      .reverse()
-      .filter((item) => Boolean(query('[data-slot="avatar"], [data-slot="avatar-image"], img.rounded-full', item)))
-      .map((item) => trim(query('.whitespace-pre-wrap, .text-body-md', item)?.innerText || query('.whitespace-pre-wrap, .text-body-md', item)?.textContent))
-      .find(isSubstantivePrompt) || '';
+    return (
+      feedItems
+        .slice()
+        .reverse()
+        .filter((item) => Boolean(query('[data-slot="avatar"], [data-slot="avatar-image"], img.rounded-full', item)))
+        .map((item) => trim(query('.whitespace-pre-wrap, .text-body-md', item)?.innerText || query('.whitespace-pre-wrap, .text-body-md', item)?.textContent))
+        .find(isSubstantivePrompt) || ''
+    );
   };
 
   const findLastPromptWithFallbackScroll = async () => {
@@ -323,10 +321,17 @@
       case ActionTypes.SET_SCROLL_INTERVAL:
         return Object.freeze({ ...state, scrollIntervalSeconds: Number(action.payload) || 5 });
 
-      case ActionTypes.ENQUEUE_MESSAGE:
-        return trim(action.payload)
-          ? Object.freeze({ ...state, queue: append(trim(action.payload), state.queue) })
-          : state;
+      case ActionTypes.ENQUEUE_MESSAGE: {
+        const trimmed = trim(action.payload);
+        if (!trimmed) return state;
+        const wasEmpty = state.queue.length === 0;
+        return Object.freeze({
+          ...state,
+          queue: append(trimmed, state.queue),
+          // If queue was empty, automatically enable the auto-runner
+          isRunnerActive: wasEmpty ? true : state.isRunnerActive,
+        });
+      }
 
       case ActionTypes.UPDATE_MESSAGE:
         return Object.freeze({
@@ -497,6 +502,10 @@
         </div>
       </div>
 
+      <button id="aq-btn-scroll-up" class="aq-btn aq-btn-secondary">
+        ▲ Scroll Up
+      </button>
+
       <div class="aq-card">
         <div class="aq-card-header">
           <span>Last User Task (Confirmed)</span>
@@ -647,6 +656,7 @@
     const addBtn = query('#aq-btn-add', modal);
     const clearBtn = query('#aq-btn-clear', modal);
     const startBtn = query('#aq-btn-start', modal);
+    const scrollUpBtn = query('#aq-btn-scroll-up', modal);
     const queueList = query('#aq-queue-list', modal);
     const queueCount = query('#aq-count', modal);
     const statusDot = query('#aristotle-status-dot', modal);
@@ -684,6 +694,74 @@
       startBtn.classList.toggle('aq-btn-danger', active);
       startBtn.classList.toggle('aq-btn-secondary', !active);
     };
+
+    const updateScrollUpButtonUI = (active) => {
+      scrollUpBtn.textContent = active ? '⏹ Stop Scroll Up' : '▲ Scroll Up';
+      scrollUpBtn.classList.toggle('aq-btn-danger', active);
+      scrollUpBtn.classList.toggle('aq-btn-secondary', !active);
+    };
+
+    // Scroll up state & loop
+    let scrollUpTimer = null;
+
+    const stopScrollUp = () => {
+      if (scrollUpTimer) {
+        clearInterval(scrollUpTimer);
+        scrollUpTimer = null;
+      }
+      updateScrollUpButtonUI(false);
+      setLog('Scroll up stopped.', 'idle');
+    };
+
+    const startScrollUp = () => {
+      if (scrollUpTimer) return;
+      updateScrollUpButtonUI(true);
+      setLog('Scrolling up to the beginning of chat...', 'active');
+
+      let zeroCount = 0;
+
+      scrollUpTimer = setInterval(() => {
+        const container = selectScrollContainer();
+        const isWindow = !container || container === document.documentElement || container === document.body;
+
+        const currentTop = isWindow
+          ? window.scrollY || document.documentElement.scrollTop
+          : container.scrollTop;
+
+        const step = container && !isWindow ? Math.max(container.clientHeight * 0.75, 450) : 600;
+
+        if (container && !isWindow) {
+          container.scrollTop = Math.max(0, container.scrollTop - step);
+        }
+        window.scrollBy(0, -step);
+
+        const nextTop = isWindow
+          ? window.scrollY || document.documentElement.scrollTop
+          : container.scrollTop;
+
+        if (nextTop <= 0) {
+          zeroCount++;
+          if (zeroCount >= 12) {
+            if (scrollUpTimer) {
+              clearInterval(scrollUpTimer);
+              scrollUpTimer = null;
+            }
+            updateScrollUpButtonUI(false);
+            setLog('Reached the beginning of chat.', 'idle');
+          }
+        } else {
+          zeroCount = 0;
+        }
+      }, 100);
+    };
+
+    scrollUpBtn.addEventListener('click', () => {
+      if (scrollUpTimer) {
+        stopScrollUp();
+      } else {
+        startScrollUp();
+      }
+    });
 
     const updateEditStats = (text = '') => {
       const { chars, lines } = calculateStats(text);
@@ -782,6 +860,13 @@
       inputArea.value = '';
     });
 
+    inputArea.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        addBtn.click();
+      }
+    });
+
     clearBtn.addEventListener('click', () => {
       const { isRunnerActive } = store.getState();
       if (isRunnerActive && !confirm('Pause runner and clear queue?')) return;
@@ -811,6 +896,8 @@
       updateRunnerButtonUI,
       triggerScan,
       openEditDialog,
+      isScrollUpActive: () => Boolean(scrollUpTimer),
+      stopScrollUp,
       confirmedPromptInput,
       autoScrollCheckbox,
       scrollIntervalInput,
@@ -866,7 +953,7 @@
 
   const evaluateBusyPhase = async (state, store, ui) => {
     const now = Date.now();
-    if (state.autoScrollEnabled && now - state.lastScrollTimestamp >= state.scrollIntervalSeconds * 1000) {
+    if (state.autoScrollEnabled && !ui.isScrollUpActive() && now - state.lastScrollTimestamp >= state.scrollIntervalSeconds * 1000) {
       performFeedScroll();
       store.dispatch({ type: ActionTypes.SET_LAST_SCROLL_TIME, payload: now });
     }
@@ -886,7 +973,7 @@
   const evaluateIdleTransition = async (state, store, ui) => {
     store.dispatch({ type: ActionTypes.SET_BUSY_STATE, payload: { isBusy: false } });
     ui.setLog('Task stopped. Checking outcome...', 'waiting');
-    if (state.autoScrollEnabled) {
+    if (state.autoScrollEnabled && !ui.isScrollUpActive()) {
       performFeedScroll();
       await sleep(1200);
       performFeedScroll();
@@ -907,13 +994,12 @@
       return false;
     }
 
-    // Safety Guard: Textarea already contains non-empty user draft -> Pause!
     const currentComposerText = trim(textarea.value);
     if (currentComposerText.length > 0) {
       store.dispatch({ type: ActionTypes.SET_BUDGET_RECOVERY, payload: false });
       ui.updateBudgetButtonUI(false);
       ui.setLog('Composer contains unsent text! Autosubmit on Out of Budget PAUSED.', 'idle');
-      return true; // Stop recovery evaluation, leave task unhandled
+      return true;
     }
 
     const mode = selectComposerMode();
@@ -924,7 +1010,6 @@
       return true;
     }
 
-    // Flag handled
     if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
     else store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
 
@@ -967,7 +1052,6 @@
     const isReady = textarea && !textarea.disabled && !selectStopButton();
     if (!isReady) return;
 
-    // Safety Guard: Pause runner if composer has manual draft
     const currentComposerText = trim(textarea.value);
     if (currentComposerText.length > 0) {
       store.dispatch({ type: ActionTypes.SET_RUNNER_ACTIVE, payload: false });
@@ -1065,9 +1149,12 @@
     const store = createStore(rootReducer, INITIAL_STATE, (nextState, action) => {
       persistToStorage(nextState);
       if (ui) {
-        // Reactive UI updates on specific action dispatches
         if ([ActionTypes.ENQUEUE_MESSAGE, ActionTypes.UPDATE_MESSAGE, ActionTypes.REMOVE_MESSAGE, ActionTypes.CLEAR_QUEUE, ActionTypes.POP_QUEUE, ActionTypes.HYDRATE_STATE].includes(action.type)) {
           ui.renderQueue(nextState.queue);
+          ui.updateRunnerButtonUI(nextState.isRunnerActive);
+        }
+        if (action.type === ActionTypes.ENQUEUE_MESSAGE && nextState.isRunnerActive) {
+          ui.setLog('Auto-Runner enabled (task queued)', 'active');
         }
         if (action.type === ActionTypes.OPEN_EDIT_MODAL) {
           ui.openEditDialog(action.payload);
