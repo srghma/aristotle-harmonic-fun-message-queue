@@ -328,7 +328,6 @@
         return Object.freeze({
           ...state,
           queue: append(trimmed, state.queue),
-          // If queue was empty, automatically enable the auto-runner
           isRunnerActive: wasEmpty ? true : state.isRunnerActive,
         });
       }
@@ -402,8 +401,76 @@
   };
 
   // =========================================================================
-  // 5. Side-Effecting Drivers (I/O Boundary)
+  // 5. Side-Effecting Drivers (I/O Boundary & Mobile Keep-Alive)
   // =========================================================================
+
+  // --- MOBILE DEVICE DETECTION ---
+  const isMobileDevice = (() => {
+    if (typeof navigator.userAgentData?.mobile === 'boolean') {
+      return navigator.userAgentData.mobile;
+    }
+    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  })();
+
+  // --- MOBILE SLEEP PREVENTION (WakeLock + Silent Audio Hack) ---
+  let wakeLockSentinel = null;
+  let silentAudioEl = null;
+
+  const acquireWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator && (!wakeLockSentinel || wakeLockSentinel.released)) {
+        wakeLockSentinel = await navigator.wakeLock.request('screen');
+        wakeLockSentinel.addEventListener('release', () => {
+          wakeLockSentinel = null;
+        });
+      }
+    } catch (err) {
+      // Non-critical on browsers without WakeLock support
+    }
+  };
+
+  const releaseWakeLock = () => {
+    if (wakeLockSentinel) {
+      wakeLockSentinel.release().catch(() => { });
+      wakeLockSentinel = null;
+    }
+  };
+
+  const playSilentAudio = () => {
+    if (!silentAudioEl) {
+      silentAudioEl = document.createElement('audio');
+      silentAudioEl.loop = true;
+      silentAudioEl.preload = 'auto';
+      // 1-second silent WAV base64
+      silentAudioEl.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+    }
+    if (silentAudioEl.paused) {
+      silentAudioEl.play().catch(() => { });
+    }
+  };
+
+  const pauseSilentAudio = () => {
+    if (silentAudioEl && !silentAudioEl.paused) {
+      silentAudioEl.pause();
+    }
+  };
+
+  const syncKeepAliveState = (state) => {
+    // ONLY run keep-alive logic on mobile devices (Kiwi on tablet/phone)
+    if (!isMobileDevice) {
+      return;
+    }
+
+    const shouldStayAlive = state.isRunnerActive || state.isBusy || state.isRecoveringBudget;
+
+    if (shouldStayAlive) {
+      acquireWakeLock();
+      playSilentAudio();
+    } else {
+      releaseWakeLock();
+      pauseSilentAudio();
+    }
+  };
 
   const persistToStorage = (state) => {
     const payload = {
@@ -648,7 +715,6 @@
     const { modal, editOverlay } = elements;
     const { dispatch } = store;
 
-    // Element queries
     const inputArea = query('#aristotle-input-area', modal);
     const confirmedPromptInput = query('#aq-confirmed-prompt', modal);
     const rescanBtn = query('#aq-btn-rescan', modal);
@@ -666,7 +732,6 @@
     const autoScrollCheckbox = query('#aq-toggle-autoscroll', modal);
     const scrollIntervalInput = query('#aq-scroll-interval', modal);
 
-    // Edit modal elements
     const editBadge = query('#aq-edit-badge', editOverlay);
     const editStats = query('#aq-edit-stats', editOverlay);
     const editTextarea = query('#aq-edit-textarea', editOverlay);
@@ -701,7 +766,6 @@
       scrollUpBtn.classList.toggle('aq-btn-secondary', !active);
     };
 
-    // Scroll up state & loop
     let scrollUpTimer = null;
 
     const stopScrollUp = () => {
@@ -793,7 +857,6 @@
       closeEditDialog();
     };
 
-    // Listeners
     editTextarea.addEventListener('input', () => updateEditStats(editTextarea.value));
     editSaveBtn.addEventListener('click', commitEditDialog);
     editCancelBtn.addEventListener('click', closeEditDialog);
@@ -829,10 +892,13 @@
 
     rescanBtn.addEventListener('click', triggerScan);
 
+    // Tap handlers prime mobile audio autoplay
     budgetToggleBtn.addEventListener('click', () => {
       dispatch({ type: ActionTypes.TOGGLE_BUDGET_RECOVERY });
       const enabled = store.getState().autoBudgetRecoveryEnabled;
       updateBudgetButtonUI(enabled);
+      syncKeepAliveState(store.getState());
+
       if (enabled) {
         triggerScan();
         setLog('Autosubmit on Out of Budget: ENABLED', 'active');
@@ -850,7 +916,8 @@
       dispatch({ type: ActionTypes.TOGGLE_RUNNER });
       const active = store.getState().isRunnerActive;
       updateRunnerButtonUI(active);
-      setLog(active ? 'Auto-Runner started' : 'Auto-Runner paused', active ? 'active' : 'idle');
+      syncKeepAliveState(store.getState());
+      setLog(active ? `Auto-Runner started${isMobileDevice ? ' (Keep-Alive on)' : ''}` : 'Auto-Runner paused', active ? 'active' : 'idle');
     });
 
     addBtn.addEventListener('click', () => {
@@ -858,6 +925,7 @@
       if (!text) return;
       dispatch({ type: ActionTypes.ENQUEUE_MESSAGE, payload: text });
       inputArea.value = '';
+      syncKeepAliveState(store.getState());
     });
 
     inputArea.addEventListener('keydown', (e) => {
@@ -872,6 +940,7 @@
       if (isRunnerActive && !confirm('Pause runner and clear queue?')) return;
       dispatch({ type: ActionTypes.CLEAR_QUEUE });
       updateRunnerButtonUI(false);
+      syncKeepAliveState(store.getState());
     });
 
     autoScrollCheckbox.addEventListener('change', () => {
@@ -1148,6 +1217,8 @@
 
     const store = createStore(rootReducer, INITIAL_STATE, (nextState, action) => {
       persistToStorage(nextState);
+      syncKeepAliveState(nextState);
+
       if (ui) {
         if ([ActionTypes.ENQUEUE_MESSAGE, ActionTypes.UPDATE_MESSAGE, ActionTypes.REMOVE_MESSAGE, ActionTypes.CLEAR_QUEUE, ActionTypes.POP_QUEUE, ActionTypes.HYDRATE_STATE].includes(action.type)) {
           ui.renderQueue(nextState.queue);
@@ -1163,6 +1234,15 @@
     });
 
     ui = bindUI(elements, store);
+
+    // Re-acquire WakeLock if tab regains focus on Android
+    if (isMobileDevice) {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          syncKeepAliveState(store.getState());
+        }
+      });
+    }
 
     registerInputObservers(store, (newPrompt) => {
       ui.confirmedPromptInput.value = newPrompt;
@@ -1187,6 +1267,7 @@
         await ui.triggerScan();
       }
 
+      syncKeepAliveState(store.getState());
       startContinuousLoop(store, ui);
     };
 
