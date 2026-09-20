@@ -64,13 +64,13 @@
     return `continue previous task:\n${trimmed}`;
   };
 
+  // FIX: tightened to require an explicit terminal phrase. The old loose
+  // fallback (`!s.includes('COMPLETED') && s.includes('BUDGET')`) matched any
+  // non-completed screen that merely showed the word "budget" anywhere (e.g.
+  // a persistent budget meter in the agent toolbar), causing false positives.
   const isOutOfBudgetStatus = (status = '') => {
     const s = toUpper(status);
-    return (
-      s.includes('OUT OF BUDGET') ||
-      s.includes('RAN OUT OF TIME') ||
-      (!s.includes('COMPLETED') && s.includes('BUDGET'))
-    );
+    return s.includes('OUT OF BUDGET') || s.includes('RAN OUT OF TIME');
   };
 
   // =========================================================================
@@ -142,41 +142,20 @@
     return document.documentElement || document.body;
   };
 
+  // FIX: completely rewritten. Aristotle's UI keeps a single, ever-current
+  // `[data-feed-last]` element whose text is a plain-language summary of the
+  // very last event in the feed ("Aristotle is working…", "Aristotle ran out
+  // of time", etc). The previous multi-strategy implementation scanned the
+  // whole document (or the agent toolbar) for purple/budget-colored badges,
+  // which could match stale badges left over from earlier, already-resolved
+  // task groups anywhere in the scroll history. Reading `[data-feed-last]`
+  // directly is simpler and can never pick up stale history, since it is by
+  // construction always the current last item.
   const selectExecutionStatus = () => {
-    const strategies = [
-      () => {
-        const toolbar = query('[role="toolbar"][aria-label="Agent controls"]', document);
-        const badge = toolbar ? query('.text-text-purple, [class*="text-purple"]', toolbar) : null;
-        return badge && trim(badge.textContent)
-          ? { element: badge, status: toUpper(badge.textContent).trim() }
-          : null;
-      },
-      () => {
-        const badges = queryAll('.text-text-purple, [class*="text-purple"], [data-variant="purple"], span.bg-purple\\/15', document);
-        const match = badges.reverse().find((b) => /budget|time/i.test(b.textContent || ''));
-        return match ? { element: match, status: toUpper(match.textContent).trim() } : null;
-      },
-      () => {
-        const headers = queryAll('[data-feed-header]', document);
-        const lastHeader = headers[headers.length - 1];
-        if (!lastHeader) return null;
-        const badge = query('[data-slot="tooltip-trigger"], .group\\/badge, span.uppercase, .text-text-purple', lastHeader);
-        return badge && trim(badge.textContent)
-          ? { element: lastHeader, status: toUpper(badge.textContent).trim() }
-          : null;
-      },
-      () => {
-        const spans = queryAll('span.text-body-md, div.text-body-md, [data-feed-item] span, [role="log"] span', document);
-        const match = spans.reverse().find((el) => /ran out of time|out of budget/i.test(el.textContent || ''));
-        return match ? { element: match, status: toUpper(match.textContent).trim() } : null;
-      },
-    ];
-
-    for (const strat of strategies) {
-      const match = strat();
-      if (match) return match;
-    }
-    return { element: null, status: 'UNKNOWN' };
+    const anchor = query('[data-feed-last]', document);
+    if (!anchor) return { element: null, status: 'UNKNOWN' };
+    const text = trim(anchor.textContent);
+    return text ? { element: anchor, status: toUpper(text) } : { element: anchor, status: 'UNKNOWN' };
   };
 
   const extractPromptTextFromButton = (copyBtn) => {
@@ -281,6 +260,12 @@
     SET_FALLBACK_KEY: 'SET_FALLBACK_KEY',
     OPEN_EDIT_MODAL: 'OPEN_EDIT_MODAL',
     CLOSE_EDIT_MODAL: 'CLOSE_EDIT_MODAL',
+    // FIX: new action to support one-shot suppression of budget-recovery
+    // right after the user manually clicks Stop. Aristotle renders the exact
+    // same feed text ("Aristotle ran out of time") for a manual stop as it
+    // does for a genuine timeout, so this text alone can never disambiguate
+    // the two — an explicit signal captured at click-time is required.
+    SET_SUPPRESS_BUDGET_CHECK: 'SET_SUPPRESS_BUDGET_CHECK',
   });
 
   const INITIAL_STATE = Object.freeze({
@@ -296,6 +281,8 @@
     lastScrollTimestamp: 0,
     handledFallbackKey: '',
     editingIndex: null,
+    // FIX: see SET_SUPPRESS_BUDGET_CHECK above.
+    suppressNextBudgetCheck: false,
   });
 
   const rootReducer = (state = INITIAL_STATE, action) => {
@@ -379,6 +366,9 @@
 
       case ActionTypes.CLOSE_EDIT_MODAL:
         return Object.freeze({ ...state, editingIndex: null });
+
+      case ActionTypes.SET_SUPPRESS_BUDGET_CHECK:
+        return Object.freeze({ ...state, suppressNextBudgetCheck: Boolean(action.payload) });
 
       default:
         return state;
@@ -1016,6 +1006,25 @@
     );
   };
 
+  // FIX: new observer. Aristotle renders the identical feed text
+  // ("Aristotle ran out of time") for both a genuine timeout and a manual
+  // click of the Stop button, so the feed text alone cannot disambiguate the
+  // two. This listener captures the manual-stop intent at the moment of the
+  // click and sets a one-shot flag that evaluateBudgetRecovery consumes on
+  // its very next check, skipping auto-continuation for that event.
+  const registerManualStopObserver = (store) => {
+    document.addEventListener(
+      'click',
+      (e) => {
+        const stopBtn = selectStopButton();
+        if (stopBtn && (stopBtn === e.target || stopBtn.contains(e.target))) {
+          store.dispatch({ type: ActionTypes.SET_SUPPRESS_BUDGET_CHECK, payload: true });
+        }
+      },
+      true
+    );
+  };
+
   // =========================================================================
   // 7. Functional Reactive Loop & Evaluators
   // =========================================================================
@@ -1052,12 +1061,24 @@
   };
 
   const evaluateBudgetRecovery = async (state, store, ui, textarea) => {
+    // FIX: consume the manual-stop suppression flag first, before doing any
+    // other budget-related detection. This must be the very first check,
+    // since the feed text at this point is textually indistinguishable from
+    // a genuine "out of budget"/"ran out of time" event.
+    if (state.suppressNextBudgetCheck) {
+      store.dispatch({ type: ActionTypes.SET_SUPPRESS_BUDGET_CHECK, payload: false });
+      const execInfo = selectExecutionStatus();
+      if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
+      ui.setLog('Manual stop detected — skipping auto-continue this cycle.', 'idle');
+      return true;
+    }
+
     const execInfo = selectExecutionStatus();
     const isBudgetExhausted = isOutOfBudgetStatus(execInfo.status);
     const fallbackKey = `${execInfo.status}_${state.lastSentMessage}`;
-    const isAlreadyHandled = execInfo.element
-      ? execInfo.element.dataset.aqHandled === 'true'
-      : state.handledFallbackKey === fallbackKey;
+    const isAlreadyHandled =
+      (execInfo.element?.dataset.aqHandled === 'true') ||
+      state.handledFallbackKey === fallbackKey;
 
     if (!state.autoBudgetRecoveryEnabled || !isBudgetExhausted || isAlreadyHandled || state.isRecoveringBudget) {
       return false;
@@ -1073,14 +1094,19 @@
 
     const mode = selectComposerMode();
     if (mode === 'ask') {
+      // FIX: always mark both the DOM element and the fallback-key state,
+      // rather than only one or the other. A React re-render can replace the
+      // status element (wiping the dataset flag) while the fallback-key
+      // check alone was previously only consulted as an else-branch, which
+      // meant a re-rendered element could re-trigger this same event.
       if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
-      else store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
+      store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
       ui.setLog('OUT OF BUDGET detected, but composer is in ASK mode. Continuation skipped.', 'idle');
       return true;
     }
 
     if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
-    else store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
+    store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
 
     store.dispatch({ type: ActionTypes.SET_RECOVERING_BUDGET, payload: true });
     ui.setLog('OUT OF BUDGET detected! Submitting continuation...', 'waiting');
@@ -1248,6 +1274,10 @@
       ui.confirmedPromptInput.value = newPrompt;
     });
 
+    // FIX: register the manual-stop click observer alongside the other
+    // input observers so a Stop click is captured for the whole session.
+    registerManualStopObserver(store);
+
     const bootWithData = async (data) => {
       const hydrated = hydrateState(data);
       store.dispatch({ type: ActionTypes.HYDRATE_STATE, payload: hydrated });
@@ -1265,6 +1295,20 @@
       if (hydrated.autoBudgetRecoveryEnabled) {
         await sleep(500);
         await ui.triggerScan();
+      }
+
+      // FIX: seed the currently-displayed status as already-handled before
+      // the automation loop starts watching. Without this, reloading the tab
+      // while the last feed item still legitimately reads "ran out of time"
+      // (or a stale prior state) would cause an immediate, unwanted
+      // auto-continuation on the very first tick.
+      const bootStatus = selectExecutionStatus();
+      if (bootStatus.element) bootStatus.element.dataset.aqHandled = 'true';
+      if (bootStatus.status !== 'UNKNOWN') {
+        store.dispatch({
+          type: ActionTypes.SET_FALLBACK_KEY,
+          payload: `${bootStatus.status}_${store.getState().lastSentMessage}`,
+        });
       }
 
       syncKeepAliveState(store.getState());
