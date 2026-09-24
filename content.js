@@ -23,8 +23,23 @@
 
   // Array pure transforms
   const append = curry((item, arr) => [...arr, item]);
+  const prepend = curry((item, arr) => [item, ...arr]);
   const removeAt = curry((index, arr) => arr.filter((_, i) => i !== index));
   const updateAt = curry((index, val, arr) => arr.map((item, i) => (i === index ? val : item)));
+  const moveItem = curry((fromIndex, toIndex, arr) => {
+    if (
+      fromIndex < 0 ||
+      fromIndex >= arr.length ||
+      toIndex < 0 ||
+      toIndex >= arr.length ||
+      fromIndex === toIndex
+    ) {
+      return arr;
+    }
+    const item = arr[fromIndex];
+    const without = arr.filter((_, i) => i !== fromIndex);
+    return [...without.slice(0, toIndex), item, ...without.slice(toIndex)];
+  });
 
   // String formatting
   const ESCAPE_MAP = Object.freeze({
@@ -64,10 +79,6 @@
     return `continue previous task:\n${trimmed}`;
   };
 
-  // FIX: tightened to require an explicit terminal phrase. The old loose
-  // fallback (`!s.includes('COMPLETED') && s.includes('BUDGET')`) matched any
-  // non-completed screen that merely showed the word "budget" anywhere (e.g.
-  // a persistent budget meter in the agent toolbar), causing false positives.
   const isOutOfBudgetStatus = (status = '') => {
     const s = toUpper(status);
     return s.includes('OUT OF BUDGET') || s.includes('RAN OUT OF TIME');
@@ -142,16 +153,22 @@
     return document.documentElement || document.body;
   };
 
-  // FIX: completely rewritten. Aristotle's UI keeps a single, ever-current
-  // `[data-feed-last]` element whose text is a plain-language summary of the
-  // very last event in the feed ("Aristotle is working…", "Aristotle ran out
-  // of time", etc). The previous multi-strategy implementation scanned the
-  // whole document (or the agent toolbar) for purple/budget-colored badges,
-  // which could match stale badges left over from earlier, already-resolved
-  // task groups anywhere in the scroll history. Reading `[data-feed-last]`
-  // directly is simpler and can never pick up stale history, since it is by
-  // construction always the current last item.
+  const selectLastFeedHeader = () => {
+    const headers = queryAll('[data-feed-header]', document);
+    return headers.length ? headers[headers.length - 1] : null;
+  };
+
+  const selectHeaderStatusBadge = (header) => {
+    if (!header) return null;
+    return query('[data-slot="badge"][data-variant], [data-slot="tooltip-trigger"][data-variant]', header);
+  };
+
   const selectExecutionStatus = () => {
+    const header = selectLastFeedHeader();
+    const badge = selectHeaderStatusBadge(header);
+    const badgeText = badge ? trim(badge.textContent) : '';
+    if (badgeText) return { element: badge, status: toUpper(badgeText) };
+
     const anchor = query('[data-feed-last]', document);
     if (!anchor) return { element: null, status: 'UNKNOWN' };
     const text = trim(anchor.textContent);
@@ -248,6 +265,8 @@
     SET_AUTO_SCROLL: 'SET_AUTO_SCROLL',
     SET_SCROLL_INTERVAL: 'SET_SCROLL_INTERVAL',
     ENQUEUE_MESSAGE: 'ENQUEUE_MESSAGE',
+    PREPEND_MESSAGE: 'PREPEND_MESSAGE',
+    MOVE_MESSAGE: 'MOVE_MESSAGE',
     UPDATE_MESSAGE: 'UPDATE_MESSAGE',
     REMOVE_MESSAGE: 'REMOVE_MESSAGE',
     CLEAR_QUEUE: 'CLEAR_QUEUE',
@@ -260,11 +279,6 @@
     SET_FALLBACK_KEY: 'SET_FALLBACK_KEY',
     OPEN_EDIT_MODAL: 'OPEN_EDIT_MODAL',
     CLOSE_EDIT_MODAL: 'CLOSE_EDIT_MODAL',
-    // FIX: new action to support one-shot suppression of budget-recovery
-    // right after the user manually clicks Stop. Aristotle renders the exact
-    // same feed text ("Aristotle ran out of time") for a manual stop as it
-    // does for a genuine timeout, so this text alone can never disambiguate
-    // the two — an explicit signal captured at click-time is required.
     SET_SUPPRESS_BUDGET_CHECK: 'SET_SUPPRESS_BUDGET_CHECK',
   });
 
@@ -281,7 +295,6 @@
     lastScrollTimestamp: 0,
     handledFallbackKey: '',
     editingIndex: null,
-    // FIX: see SET_SUPPRESS_BUDGET_CHECK above.
     suppressNextBudgetCheck: false,
   });
 
@@ -316,6 +329,25 @@
           ...state,
           queue: append(trimmed, state.queue),
           isRunnerActive: wasEmpty ? true : state.isRunnerActive,
+        });
+      }
+
+      case ActionTypes.PREPEND_MESSAGE: {
+        const trimmed = trim(action.payload);
+        if (!trimmed) return state;
+        const wasEmpty = state.queue.length === 0;
+        return Object.freeze({
+          ...state,
+          queue: prepend(trimmed, state.queue),
+          isRunnerActive: wasEmpty ? true : state.isRunnerActive,
+        });
+      }
+
+      case ActionTypes.MOVE_MESSAGE: {
+        const { fromIndex, toIndex } = action.payload;
+        return Object.freeze({
+          ...state,
+          queue: moveItem(fromIndex, toIndex, state.queue),
         });
       }
 
@@ -394,7 +426,6 @@
   // 5. Side-Effecting Drivers (I/O Boundary & Mobile Keep-Alive)
   // =========================================================================
 
-  // --- MOBILE DEVICE DETECTION ---
   const isMobileDevice = (() => {
     if (typeof navigator.userAgentData?.mobile === 'boolean') {
       return navigator.userAgentData.mobile;
@@ -402,7 +433,6 @@
     return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   })();
 
-  // --- MOBILE SLEEP PREVENTION (WakeLock + Silent Audio Hack) ---
   let wakeLockSentinel = null;
   let silentAudioEl = null;
 
@@ -414,9 +444,7 @@
           wakeLockSentinel = null;
         });
       }
-    } catch (err) {
-      // Non-critical on browsers without WakeLock support
-    }
+    } catch (err) { }
   };
 
   const releaseWakeLock = () => {
@@ -431,7 +459,6 @@
       silentAudioEl = document.createElement('audio');
       silentAudioEl.loop = true;
       silentAudioEl.preload = 'auto';
-      // 1-second silent WAV base64
       silentAudioEl.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
     }
     if (silentAudioEl.paused) {
@@ -446,10 +473,7 @@
   };
 
   const syncKeepAliveState = (state) => {
-    // ONLY run keep-alive logic on mobile devices (Kiwi on tablet/phone)
-    if (!isMobileDevice) {
-      return;
-    }
+    if (!isMobileDevice) return;
 
     const shouldStayAlive = state.isRunnerActive || state.isBusy || state.isRecoveringBudget;
 
@@ -572,7 +596,7 @@
         <div class="aq-card-hint">Used for auto-submitting continuation when out of budget.</div>
       </div>
 
-      <textarea id="aristotle-input-area" placeholder="Paste full Markdown message here..."></textarea>
+      <textarea id="aristotle-input-area" placeholder="Paste full Markdown message here... (Ctrl+Enter: push to end, Ctrl+Shift+Enter: push to top)"></textarea>
       <div class="aq-btn-row">
         <button id="aq-btn-add" class="aq-btn aq-btn-secondary">+ Add Message to Queue</button>
         <button id="aq-btn-clear" class="aq-btn aq-btn-danger">Clear</button>
@@ -663,12 +687,20 @@
     }
 
     container.innerHTML = queue
-      .map(
-        (text, idx) => `
+      .map((text, idx) => {
+        const isFirst = idx === 0;
+        const isLast = idx === queue.length - 1;
+
+        const upBtnStyle = `cursor:${isFirst ? 'not-allowed' : 'pointer'}; opacity:${isFirst ? '0.25' : '0.85'}; font-size:9px; line-height:1; padding:2px 4px; background:#27272a; border:1px solid #3f3f46; border-radius:3px; color:#d4d4d8; display:inline-flex; align-items:center; justify-content:center;`;
+        const downBtnStyle = `cursor:${isLast ? 'not-allowed' : 'pointer'}; opacity:${isLast ? '0.25' : '0.85'}; font-size:9px; line-height:1; padding:2px 4px; background:#27272a; border:1px solid #3f3f46; border-radius:3px; color:#d4d4d8; display:inline-flex; align-items:center; justify-content:center;`;
+
+        return `
           <div class="aq-item" data-idx="${idx}">
             <div class="aq-item-header">
               <span style="color:#71717a; font-family:monospace;">#${idx + 1} (${text.length} chars)</span>
-              <div style="display:flex; gap:8px; align-items:center;">
+              <div style="display:flex; gap:6px; align-items:center;">
+                <button type="button" class="aq-item-move-up" data-idx="${idx}" title="Move up in queue" ${isFirst ? 'disabled' : ''} style="${upBtnStyle}">▲</button>
+                <button type="button" class="aq-item-move-down" data-idx="${idx}" title="Move down in queue" ${isLast ? 'disabled' : ''} style="${downBtnStyle}">▼</button>
                 <span class="aq-item-edit" data-idx="${idx}" title="Edit in modal">edit</span>
                 <span class="aq-item-toggle" data-idx="${idx}">expand</span>
                 <span class="aq-item-remove" data-idx="${idx}">&times;</span>
@@ -676,9 +708,35 @@
             </div>
             <div class="aq-item-text collapsed" id="aq-text-${idx}">${escapeHtml(text)}</div>
           </div>
-        `
-      )
+        `;
+      })
       .join('');
+
+    queryAll('.aq-item-move-up', container).forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(e.currentTarget.dataset.idx, 10);
+        if (idx > 0) {
+          dispatch({
+            type: ActionTypes.MOVE_MESSAGE,
+            payload: { fromIndex: idx, toIndex: idx - 1 },
+          });
+        }
+      });
+    });
+
+    queryAll('.aq-item-move-down', container).forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(e.currentTarget.dataset.idx, 10);
+        if (idx < queue.length - 1) {
+          dispatch({
+            type: ActionTypes.MOVE_MESSAGE,
+            payload: { fromIndex: idx, toIndex: idx + 1 },
+          });
+        }
+      });
+    });
 
     queryAll('.aq-item-edit', container).forEach((btn) => {
       btn.addEventListener('click', (e) => {
@@ -882,7 +940,6 @@
 
     rescanBtn.addEventListener('click', triggerScan);
 
-    // Tap handlers prime mobile audio autoplay
     budgetToggleBtn.addEventListener('click', () => {
       dispatch({ type: ActionTypes.TOGGLE_BUDGET_RECOVERY });
       const enabled = store.getState().autoBudgetRecoveryEnabled;
@@ -918,10 +975,23 @@
       syncKeepAliveState(store.getState());
     });
 
+    // Keyboard shortcuts:
+    // Ctrl+Enter: push to end
+    // Ctrl+Shift+Enter: push to beginning
     inputArea.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
-        addBtn.click();
+        const text = inputArea.value.trim();
+        if (!text) return;
+
+        if (e.shiftKey) {
+          dispatch({ type: ActionTypes.PREPEND_MESSAGE, payload: text });
+        } else {
+          dispatch({ type: ActionTypes.ENQUEUE_MESSAGE, payload: text });
+        }
+
+        inputArea.value = '';
+        syncKeepAliveState(store.getState());
       }
     });
 
@@ -1006,12 +1076,6 @@
     );
   };
 
-  // FIX: new observer. Aristotle renders the identical feed text
-  // ("Aristotle ran out of time") for both a genuine timeout and a manual
-  // click of the Stop button, so the feed text alone cannot disambiguate the
-  // two. This listener captures the manual-stop intent at the moment of the
-  // click and sets a one-shot flag that evaluateBudgetRecovery consumes on
-  // its very next check, skipping auto-continuation for that event.
   const registerManualStopObserver = (store) => {
     document.addEventListener(
       'click',
@@ -1061,10 +1125,6 @@
   };
 
   const evaluateBudgetRecovery = async (state, store, ui, textarea) => {
-    // FIX: consume the manual-stop suppression flag first, before doing any
-    // other budget-related detection. This must be the very first check,
-    // since the feed text at this point is textually indistinguishable from
-    // a genuine "out of budget"/"ran out of time" event.
     if (state.suppressNextBudgetCheck) {
       store.dispatch({ type: ActionTypes.SET_SUPPRESS_BUDGET_CHECK, payload: false });
       const execInfo = selectExecutionStatus();
@@ -1094,11 +1154,6 @@
 
     const mode = selectComposerMode();
     if (mode === 'ask') {
-      // FIX: always mark both the DOM element and the fallback-key state,
-      // rather than only one or the other. A React re-render can replace the
-      // status element (wiping the dataset flag) while the fallback-key
-      // check alone was previously only consulted as an else-branch, which
-      // meant a re-rendered element could re-trigger this same event.
       if (execInfo.element) execInfo.element.dataset.aqHandled = 'true';
       store.dispatch({ type: ActionTypes.SET_FALLBACK_KEY, payload: fallbackKey });
       ui.setLog('OUT OF BUDGET detected, but composer is in ASK mode. Continuation skipped.', 'idle');
@@ -1246,11 +1301,25 @@
       syncKeepAliveState(nextState);
 
       if (ui) {
-        if ([ActionTypes.ENQUEUE_MESSAGE, ActionTypes.UPDATE_MESSAGE, ActionTypes.REMOVE_MESSAGE, ActionTypes.CLEAR_QUEUE, ActionTypes.POP_QUEUE, ActionTypes.HYDRATE_STATE].includes(action.type)) {
+        if (
+          [
+            ActionTypes.ENQUEUE_MESSAGE,
+            ActionTypes.PREPEND_MESSAGE,
+            ActionTypes.MOVE_MESSAGE,
+            ActionTypes.UPDATE_MESSAGE,
+            ActionTypes.REMOVE_MESSAGE,
+            ActionTypes.CLEAR_QUEUE,
+            ActionTypes.POP_QUEUE,
+            ActionTypes.HYDRATE_STATE,
+          ].includes(action.type)
+        ) {
           ui.renderQueue(nextState.queue);
           ui.updateRunnerButtonUI(nextState.isRunnerActive);
         }
-        if (action.type === ActionTypes.ENQUEUE_MESSAGE && nextState.isRunnerActive) {
+        if (
+          (action.type === ActionTypes.ENQUEUE_MESSAGE || action.type === ActionTypes.PREPEND_MESSAGE) &&
+          nextState.isRunnerActive
+        ) {
           ui.setLog('Auto-Runner enabled (task queued)', 'active');
         }
         if (action.type === ActionTypes.OPEN_EDIT_MODAL) {
@@ -1261,7 +1330,6 @@
 
     ui = bindUI(elements, store);
 
-    // Re-acquire WakeLock if tab regains focus on Android
     if (isMobileDevice) {
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
@@ -1274,8 +1342,6 @@
       ui.confirmedPromptInput.value = newPrompt;
     });
 
-    // FIX: register the manual-stop click observer alongside the other
-    // input observers so a Stop click is captured for the whole session.
     registerManualStopObserver(store);
 
     const bootWithData = async (data) => {
@@ -1297,11 +1363,6 @@
         await ui.triggerScan();
       }
 
-      // FIX: seed the currently-displayed status as already-handled before
-      // the automation loop starts watching. Without this, reloading the tab
-      // while the last feed item still legitimately reads "ran out of time"
-      // (or a stale prior state) would cause an immediate, unwanted
-      // auto-continuation on the very first tick.
       const bootStatus = selectExecutionStatus();
       if (bootStatus.element) bootStatus.element.dataset.aqHandled = 'true';
       if (bootStatus.status !== 'UNKNOWN') {
