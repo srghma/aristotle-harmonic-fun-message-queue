@@ -1,0 +1,30 @@
+[project]
+name = "myaristotle"
+version = "0.1.0"
+description = "Aristotle task watcher, puller, and queue runner"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aristotlelib",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+    "rich>=13.0.0",
+    "readchar>=4.0.0",
+]
+
+[project.scripts]
+myaristotle = "myaristotle.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myaristotle"]
+
+[dependency-groups]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
