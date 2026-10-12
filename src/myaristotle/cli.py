@@ -40,6 +40,72 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def select_account_interactive(accounts: list[str], cfg, default_acc: str | None = None) -> str | None:
+    if not sys.stdin.isatty():
+        if default_acc and default_acc in accounts:
+            return default_acc
+        return accounts[0] if accounts else None
+
+    if len(accounts) == 1:
+        return accounts[0]
+
+    import readchar
+    from readchar import key as K
+    from rich.console import Group
+    from rich.live import Live
+
+    selected_idx = accounts.index(default_acc) if (default_acc and default_acc in accounts) else 0
+
+    proj_counts = {}
+    for p in cfg.projects.values():
+        proj_counts[p.account] = proj_counts.get(p.account, 0) + 1
+
+    def render_ui() -> Panel:
+        table = Table(box=None, expand=True, show_header=True, header_style="bold dim")
+        table.add_column("", width=3)
+        table.add_column("#", width=3, style="dim")
+        table.add_column("Account Name", width=22)
+        table.add_column("Projects", width=14)
+        table.add_column("API Key Status", width=20)
+
+        for idx, acc in enumerate(accounts):
+            is_sel = idx == selected_idx
+            prefix = "[bold cyan]❯[/bold cyan]" if is_sel else " "
+            style = "bold cyan" if is_sel else ""
+
+            key_val = cfg.get_api_key_for_account(acc)
+            key_status = "[green]✓ Key present[/green]" if key_val else "[red]✗ Key missing[/red]"
+            count = proj_counts.get(acc, 0)
+            proj_str = f"[dim]{count} active[/dim]" if count else "[dim]0 active[/dim]"
+
+            table.add_row(prefix, str(idx + 1), Text(acc, style=style), proj_str, key_status)
+
+        return Panel(
+            Group(
+                table,
+                Text("\n[↑/k] Up  [↓/j] Down  [1-9] Jump  [Enter] Select  [q/Esc] Cancel", style="dim italic"),
+            ),
+            title="[bold magenta]👤 Select Aristotle Account[/bold magenta]",
+            border_style="cyan",
+            expand=False,
+        )
+
+    with Live(render_ui(), console=console, screen=True, auto_refresh=False) as live:
+        while True:
+            live.update(render_ui(), refresh=True)
+            k = readchar.readkey()
+            if k in (K.UP, "k", "K"):
+                selected_idx = max(0, selected_idx - 1)
+            elif k in (K.DOWN, "j", "J"):
+                selected_idx = min(len(accounts) - 1, selected_idx + 1)
+            elif k in (K.ENTER, K.CR):
+                return accounts[selected_idx]
+            elif k in (K.ESC, "q", "Q", K.CTRL_C, K.CTRL_D):
+                return None
+            elif k.isdigit() and 1 <= int(k) <= len(accounts):
+                return accounts[int(k) - 1]
+
+
 def select_task_interactive(tasks_info: list, project_id: str):
     if not sys.stdin.isatty():
         return tasks_info[0] if tasks_info else None
@@ -175,7 +241,7 @@ def main():
     p_sub = subparsers.add_parser("submit", aliases=["formalize", "new"], help="Submit directory to Aristotle and add to config")
     p_sub.add_argument("target", nargs="?", default=".", help="Target project directory (default: current directory)")
     p_sub.add_argument("--prompt", "-p", default="formalize", help="Initial prompt (default: 'formalize')")
-    p_sub.add_argument("--account", "-a", default=None, help="Aristotle account name from config.yaml (default: sochor896 or first account)")
+    p_sub.add_argument("--account", "-a", default=None, help="Aristotle account name from config.yaml (if omitted, opens interactive selector)")
     p_sub.add_argument("--pull", default="pull_and_commit_and_push", choices=["only_pull", "pull_and_commit", "pull_and_commit_and_push"], help="Pull policy")
     p_sub.add_argument("--branch", "-b", default=None, help="Branch name override")
     p_sub.add_argument("--config", "-c", type=Path, default=None, help="Path to config.yaml")
@@ -339,15 +405,16 @@ def main():
         cfg, cfg_file = load_config(args.config)
 
         # Select account
-        account = args.account or os.environ.get("ARISTOTLE_ACCOUNT")
+        account = args.account
         if not account:
-            if "sochor896" in cfg.accounts:
-                account = "sochor896"
-            elif cfg.accounts:
-                account = next(iter(cfg.accounts.keys()))
-            else:
+            if not cfg.accounts:
                 err_console.print("[red]Error: No accounts configured in config.yaml[/red]")
                 sys.exit(1)
+            default_acc = os.environ.get("ARISTOTLE_ACCOUNT") or ("sochor896" if "sochor896" in cfg.accounts else next(iter(cfg.accounts.keys())))
+            account = select_account_interactive(list(cfg.accounts.keys()), cfg, default_acc=default_acc)
+            if not account:
+                console.print("[yellow]Submission cancelled.[/yellow]")
+                sys.exit(0)
 
         if account not in cfg.accounts:
             err_console.print(f"[red]Error: Account '{account}' not found in config accounts: {list(cfg.accounts.keys())}[/red]")
