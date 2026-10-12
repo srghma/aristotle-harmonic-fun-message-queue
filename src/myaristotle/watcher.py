@@ -3,6 +3,8 @@ from datetime import datetime
 import os
 from pathlib import Path
 from typing import Any
+import fcntl
+import sys
 
 import readchar
 from readchar import key as K
@@ -308,6 +310,42 @@ async def key_listener(ui_state: UIState, render_event: asyncio.Event):
         render_event.set()
 
 
+class WatcherLock:
+    def __init__(self, lock_path: Path):
+        self.lock_path = lock_path
+        self._file = None
+
+    def acquire(self) -> bool:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(self.lock_path, "a+")
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._file.seek(0)
+            self._file.truncate()
+            self._file.write(f"{os.getpid()}\n")
+            self._file.flush()
+            return True
+        except (BlockingIOError, OSError):
+            return False
+
+    def get_holder_pid(self) -> str | None:
+        try:
+            if self.lock_path.exists():
+                return self.lock_path.read_text(encoding="utf-8").strip() or None
+        except Exception:
+            pass
+        return None
+
+    def release(self):
+        if self._file:
+            try:
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+                self._file.close()
+            except Exception:
+                pass
+            self._file = None
+
+
 async def run_watcher(
     config_path: Path | None = None,
     queue_dir: Path | None = None,
@@ -316,6 +354,12 @@ async def run_watcher(
     filter_branch: str | None = None,
 ):
     app_config, resolved_cfg_path = load_config(config_path)
+    lock = WatcherLock(resolved_cfg_path.parent / "watcher.lock")
+    if not lock.acquire():
+        holder_pid = lock.get_holder_pid()
+        pid_info = f" (PID: {holder_pid})" if holder_pid else ""
+        console.print(f"[bold red]❌ Error: Another watch_branches daemon is already running{pid_info}.[/bold red]")
+        sys.exit(1)
     resolved_queue_dir = (queue_dir or (resolved_cfg_path.parent / "queue")).resolve()
     resolved_backlog_dir = (backlog_dir or (resolved_cfg_path.parent / "queue_backlog")).resolve()
 
@@ -417,3 +461,4 @@ async def run_watcher(
             for task in worker_tasks.values():
                 task.cancel()
             key_task.cancel()
+            lock.release()
