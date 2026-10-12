@@ -1,3 +1,75 @@
+from rich_argparse import RichHelpFormatter
+
+RichHelpFormatter.styles.update({
+    "argparse.groups": "bold magenta",
+    "argparse.args": "bold cyan",
+    "argparse.metavar": "yellow",
+    "argparse.help": "default",
+    "argparse.prog": "bold magenta",
+    "argparse.syntax": "bold yellow",
+})
+
+def get_chrome_profiles() -> dict:
+    local_state_path = Path.home() / ".config/google-chrome/Local State"
+    if not local_state_path.is_file():
+        return {}
+    import json
+    try:
+        data = json.loads(local_state_path.read_text(encoding="utf-8"))
+        return data.get("profile", {}).get("info_cache", {})
+    except Exception:
+        return {}
+
+
+def find_chrome_profile_for_account(account: str, profiles: dict | None = None) -> str | None:
+    if profiles is None:
+        profiles = get_chrome_profiles()
+    if not profiles:
+        return None
+
+    import difflib
+
+    clean_acc = account.lower().replace("@gmail.com", "").strip()
+
+    def norm(s: str) -> str:
+        return s.replace("kh", "ch").replace("k", "ch")
+
+    norm_target = norm(clean_acc)
+
+    # 1. Exact match on username or email prefix
+    for prof_dir, info in profiles.items():
+        uname = (info.get("user_name") or info.get("email") or "").strip().lower()
+        if not uname:
+            continue
+        prefix = uname.split("@")[0]
+        if clean_acc == prefix or norm_target == norm(prefix):
+            return prof_dir
+
+    # 2. Substring match
+    for prof_dir, info in profiles.items():
+        uname = (info.get("user_name") or info.get("email") or "").strip().lower()
+        if not uname:
+            continue
+        prefix = uname.split("@")[0]
+        if clean_acc in prefix or prefix in clean_acc or norm_target in norm(prefix):
+            return prof_dir
+
+    # 3. Fuzzy similarity
+    best_match = None
+    best_score = 0.0
+    for prof_dir, info in profiles.items():
+        uname = (info.get("user_name") or info.get("email") or "").strip().lower()
+        if not uname:
+            continue
+        prefix = uname.split("@")[0]
+        score = difflib.SequenceMatcher(None, norm_target, norm(prefix)).ratio()
+        if score > best_score:
+            best_score = score
+            best_match = prof_dir
+
+    return best_match if best_score >= 0.7 else None
+
+
 import argparse
 import asyncio
 import os
@@ -191,11 +263,15 @@ def select_task_interactive(tasks_info: list, project_id: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="myaristotle - Aristotle task watcher, puller, and queue runner")
+    parser = argparse.ArgumentParser(description="myaristotle - Aristotle task watcher, puller, and queue runner", formatter_class=RichHelpFormatter)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def sub_cmd(name, **kw):
+        kw.setdefault("formatter_class", RichHelpFormatter)
+        return subparsers.add_parser(name, **kw)
+
     # 1. watch_and_pull
-    p_watch = subparsers.add_parser("watch_and_pull", aliases=["watch", "wp", "watch_branches", "wb"])
+    p_watch = sub_cmd("watch_branches", aliases=["watch_and_pull"], help="Watch projects and sync tasks")
     p_watch.add_argument("--config", "-c", type=Path, default=None, help="Path to config.yaml")
     p_watch.add_argument("--queue-dir", "-q", type=Path, default=None, help="Path to queue directory")
     p_watch.add_argument("--interval", "-i", type=int, default=None, help="Polling interval in seconds")
@@ -203,18 +279,18 @@ def main():
     p_watch.add_argument("--backlog-dir", "-k", type=Path, default=None, help="Path to queue backlog directory")
 
     # 2. status / last3
-    p_last = subparsers.add_parser("last_3_tasks_my_prompts_and_its_end_message", aliases=["last3", "status"])
+    p_last = sub_cmd("last_3_tasks_my_prompts_and_its_end_message", help="Display status and last 3 prompts with responses")
     p_last.add_argument("target", nargs="?", default=None, help="Project ID or project target spec")
     p_last.add_argument("--config", "-c", type=Path, default=None)
 
     # 3. pull_force
-    p_pull = subparsers.add_parser("pull_force", aliases=["pull"])
+    p_pull = sub_cmd("pull_force", help="Force pull results for target project")
     p_pull.add_argument("target", nargs="?", default=None)
     p_pull.add_argument("paths", nargs="*", default=[])
     p_pull.add_argument("--config", "-c", type=Path, default=None)
 
     # 4. commit_msg
-    p_msg = subparsers.add_parser("task_to_git_message", aliases=["commit_msg", "msg"])
+    p_msg = sub_cmd("task_to_git_message", help="Generate or commit git message for task")
     p_msg.add_argument("target", nargs="?", default=None)
     p_msg.add_argument("--task-id", "-t", default=None)
     p_msg.add_argument("--latest", action="store_true")
@@ -223,22 +299,31 @@ def main():
     p_msg.add_argument("--config", "-c", type=Path, default=None)
 
     # 5. queue commands
-    p_q = subparsers.add_parser("queue")
+    p_q = sub_cmd("queue")
     q_subs = p_q.add_subparsers(dest="queue_action", required=True)
 
-    q_list = q_subs.add_parser("list", aliases=["ls"])
+    def q_cmd(name, **kw):
+        kw.setdefault("formatter_class", RichHelpFormatter)
+        return q_subs.add_parser(name, **kw)
+
+    q_list = q_cmd("list", help="List all project queues")
     q_list.add_argument("--config", "-c", type=Path, default=None)
 
-    q_show = q_subs.add_parser("show")
+    q_show = q_cmd("show")
     q_show.add_argument("target")
     q_show.add_argument("--config", "-c", type=Path, default=None)
 
-    q_pop = q_subs.add_parser("pop")
+    q_pop = q_cmd("pop")
     q_pop.add_argument("target")
     q_pop.add_argument("--config", "-c", type=Path, default=None)
 
+    # 7. open_pwd_in_browser
+    p_open = sub_cmd("open_pwd_in_browser", help="Open Aristotle project URL in Google Chrome with the matching account profile")
+    p_open.add_argument("target", nargs="?", default=None, help="Target project spec, ID, or directory (default: current directory)")
+    p_open.add_argument("--config", "-c", type=Path, default=None, help="Path to config.yaml")
+
     # 6. submit / formalize command
-    p_sub = subparsers.add_parser("submit", aliases=["formalize", "new"], help="Submit directory to Aristotle and add to config")
+    p_sub = sub_cmd("formalize", aliases=["submit"], help="Submit directory to Aristotle and add to config")
     p_sub.add_argument("target", nargs="?", default=".", help="Target project directory (default: current directory)")
     p_sub.add_argument("--prompt", "-p", default="formalize", help="Initial prompt (default: 'formalize')")
     p_sub.add_argument("--account", "-a", default=None, help="Aristotle account name from config.yaml (if omitted, opens interactive selector)")
@@ -249,7 +334,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command in ("watch_and_pull", "watch", "wp", "watch_branches", "wb"):
+    if args.command in ("watch_branches", "watch_and_pull"):
         asyncio.run(run_watcher(
             config_path=args.config,
             queue_dir=args.queue_dir,
@@ -258,7 +343,7 @@ def main():
             filter_branch=args.branch,
         ))
 
-    elif args.command in ("last_3_tasks_my_prompts_and_its_end_message", "last3", "status"):
+    elif args.command == "last_3_tasks_my_prompts_and_its_end_message":
         cfg, _ = load_config(args.config)
         target_spec = args.target
         p_cfg = None
@@ -297,7 +382,7 @@ def main():
 
         asyncio.run(_run_status())
 
-    elif args.command in ("pull_force", "pull"):
+    elif args.command == "pull_force":
         cfg, _ = load_config(args.config)
         repo_root, _ = get_current_git_repo_and_branch()
         p_cfg = None
@@ -317,7 +402,7 @@ def main():
         paths = args.paths if args.paths else p_cfg.sync_only_paths
         execute_pull(p_cfg.id, api_key, paths=paths, cwd=repo_root)
 
-    elif args.command in ("task_to_git_message", "commit_msg", "msg"):
+    elif args.command == "task_to_git_message":
         cfg, _ = load_config(args.config)
         repo_root, curr_branch = get_current_git_repo_and_branch()
         p_cfg = None
@@ -396,7 +481,7 @@ def main():
             else:
                 console.print(f"[yellow]Queue for '{args.target}' ({q_file.name}) is already empty.[/yellow]")
 
-    elif args.command in ("submit", "formalize", "new"):
+    elif args.command in ("formalize", "submit"):
         target_path = Path(args.target).resolve()
         if not target_path.is_dir():
             err_console.print(f"[red]Error: Target directory '{target_path}' does not exist.[/red]")
@@ -466,6 +551,69 @@ def main():
             console.print(f"[bold green]📄 Queue file ready: {q_file}[/bold green]")
 
         asyncio.run(_run_submit())
+
+    elif args.command == "open_pwd_in_browser":
+        import shutil
+
+        cfg, _ = load_config(args.config)
+        target_input = args.target
+
+        p_cfg = None
+        target_spec = None
+
+        if target_input:
+            for spec, p in cfg.projects.items():
+                if target_input == spec or target_input == p.id or target_input in spec:
+                    p_cfg = p
+                    target_spec = spec
+                    break
+            if not p_cfg:
+                cand = Path(target_input).resolve()
+                if cand.is_dir():
+                    for spec, p in cfg.projects.items():
+                        if p.resolved_dir == cand or cand.name in spec:
+                            p_cfg = p
+                            target_spec = spec
+                            break
+        else:
+            repo_root, _ = get_current_git_repo_and_branch()
+            cur_dir = Path.cwd().resolve()
+            for spec, p in cfg.projects.items():
+                if repo_root and (p.resolved_dir == repo_root or repo_root.name in spec):
+                    p_cfg = p
+                    target_spec = spec
+                    break
+                elif p.resolved_dir == cur_dir or cur_dir.name in spec:
+                    p_cfg = p
+                    target_spec = spec
+                    break
+
+        if not p_cfg:
+            err_console.print(f"[red]Error: Could not find configured project for '{target_input or Path.cwd().name}'[/red]")
+            sys.exit(1)
+
+        url = f"https://aristotle.harmonic.fun/projects/{p_cfg.id}"
+        profile_dir = find_chrome_profile_for_account(p_cfg.account)
+
+        chrome_bin = shutil.which("google-chrome-stable") or shutil.which("google-chrome") or shutil.which("chromium")
+        if not chrome_bin:
+            err_console.print(f"[red]Error: google-chrome-stable executable not found in PATH.[/red]")
+            sys.exit(1)
+
+        cmd = [chrome_bin]
+        if profile_dir:
+            cmd.append(f"--profile-directory={profile_dir}")
+        cmd.append(url)
+
+        prof_desc = f"profile: [cyan]{profile_dir}[/cyan]" if profile_dir else "[yellow]no matching profile found[/yellow]"
+        console.print(
+            f"[bold green]🌐 Opening Aristotle project[/bold green] [cyan]{p_cfg.id}[/cyan] "
+            f"([dim]{target_spec}[/dim]) in Google Chrome\n"
+            f"   [dim]Account:[/dim] [bold]{p_cfg.account}[/bold] ({prof_desc})\n"
+            f"   [dim]URL:[/dim] [link={url}]{url}[/link]"
+        )
+
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":
