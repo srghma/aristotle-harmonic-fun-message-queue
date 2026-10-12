@@ -82,3 +82,16 @@ def test_pop_and_archive_to_backlog(tmp_path):
     assert popped2 == "Task B"
     assert read_queue(spec, queue_dir) == ["Task C"]
     assert read_queue(spec, backlog_dir) == ["Task B", "Task A"]
+
+
+def test_pop_and_archive_to_backlog_with_path(tmp_path):
+    queue_dir = tmp_path / "queue"
+    backlog_dir = tmp_path / "queue_backlog"
+    queue_file = queue_dir / "clean.md"
+
+    write_queue(queue_file, None, ["Task 1", "Task 2"])
+
+    popped = pop_top_message(queue_file, backlog_dir=backlog_dir)
+    assert popped == "Task 1"
+    assert read_queue(queue_file) == ["Task 2"]
+    assert read_queue(backlog_dir / "clean.md") == ["Task 1"]

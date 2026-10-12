@@ -1,9 +1,6 @@
 import asyncio
 from datetime import datetime
-import os
 from pathlib import Path
-from typing import Any
-import fcntl
 import sys
 
 import readchar
@@ -16,126 +13,27 @@ from aristotlelib import AgentTask, Project
 
 from .client import (
     TERMINAL_STATUSES,
-    execute_pull,
     extract_status_str,
     extract_task_id,
     fetch_project_tasks,
-    get_synced_tasks,
     get_task_info,
-    mark_task_synced,
     setup_auth_for_account,
-    stream_task_events,
     submit_prompt_to_project,
 )
-from .config import AppConfig, ProjectConfig, PullPolicy, load_config, resolve_project_dir_and_branch
-from .git_ops import (
-    build_git_commit_message,
-    format_continuation_prompt,
-    get_git_branch,
-    git_checkout,
-    git_commit_changes,
-    is_task_in_git,
-)
+from .config import AppConfig, ProjectConfig, load_config, resolve_project_dir_and_branch
+from .git_ops import format_continuation_prompt, get_git_branch
+from .lock import WatcherLock
 from .queue_manager import (
     find_or_create_queue_file,
     peek_next_message,
     pop_top_message,
     read_queue,
 )
-from .tui import ProjectState, UIState, render_tui
+from .state import ProjectState, UIState
+from .sync import format_sse_summary, monitor_task_sse, sync_completed_task
+from .tui import render_tui
 
 console = Console()
-
-
-def format_sse_summary(event_data: dict) -> str:
-    content = event_data.get("content") or event_data.get("message") or event_data.get("explanation")
-    if content:
-        first_line = str(content).strip().splitlines()[0]
-        return (first_line[:80] + "...") if len(first_line) > 80 else first_line
-    ev_type = event_data.get("event_type")
-    if ev_type:
-        return f"Prover event ({ev_type})"
-    return "Working..."
-
-
-async def monitor_task_sse(
-    endpoint_prefix: str,
-    task_id: str,
-    api_key: str,
-    tag: str,
-    p_state: ProjectState,
-    ui_state: UIState,
-    render_event: asyncio.Event,
-):
-    tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan]"
-    ui_state.add_log(f"{tag_label} 📡 Connected to live event stream for task {task_id[:8]}")
-    render_event.set()
-
-    try:
-        async for event in stream_task_events(endpoint_prefix, task_id, api_key):
-            pct = event.get("percent_complete")
-            if pct is not None:
-                p_state.percent = pct
-
-            summary = format_sse_summary(event)
-            ui_state.add_log(f"{tag_label} {escape(summary)}")
-            render_event.set()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        pass
-    finally:
-        ui_state.add_log(f"{tag_label} 🏁 SSE stream closed for task {task_id[:8]}")
-        render_event.set()
-
-
-async def sync_completed_task(
-    project_id: str,
-    task_obj: Any,
-    t_cfg: ProjectConfig,
-    repo_dir: Path,
-    branch: str,
-    api_key: str,
-    tag: str,
-    ui_state: UIState,
-) -> bool:
-    tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan]"
-    term_id = extract_task_id(task_obj)
-    if not term_id:
-        return False
-
-    should_commit = t_cfg.pull in (PullPolicy.PULL_AND_COMMIT, PullPolicy.PULL_AND_COMMIT_AND_PUSH)
-    should_push = (t_cfg.pull == PullPolicy.PULL_AND_COMMIT_AND_PUSH)
-
-    is_synced = (term_id in get_synced_tasks(project_id)) or (
-        should_commit and is_task_in_git(term_id, branch, cwd=repo_dir)
-    )
-    if is_synced:
-        return False
-
-    task_info = await get_task_info(task_obj, term_id)
-    if not task_info:
-        return False
-
-    ui_state.add_log(f"{tag_label} 📥 Downloading results for task {term_id[:8]}...")
-    if repo_dir.is_dir() and t_cfg.configured_branch:
-        git_checkout(t_cfg.configured_branch, cwd=repo_dir)
-
-    if execute_pull(project_id, api_key, t_cfg.sync_only_paths, cwd=repo_dir):
-        if should_commit and repo_dir.is_dir():
-            msg = build_git_commit_message(
-                task_info.task_id,
-                task_info.status,
-                task_info.prompt,
-                task_info.end_msg,
-            )
-            git_commit_changes(msg, push=should_push, cwd=repo_dir)
-            ui_state.add_log(f"{tag_label} 📝 Committed & pushed task {term_id[:8]}")
-        else:
-            ui_state.add_log(f"{tag_label} 📥 Download complete (commit=off)")
-        mark_task_synced(project_id, term_id)
-        return True
-    return False
 
 
 def is_account_busy(account: str, projects: list[ProjectState], current_spec: str) -> bool:
@@ -157,7 +55,7 @@ async def project_worker(
     account_locks: dict[str, asyncio.Lock] | None = None,
 ):
     tag = f"{p_state.repo_name}:{p_state.branch}"
-    tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
+    tag_label = f"[bold cyan]\\\[{tag}\\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
     repo_dir = p_state.repo_dir
 
     active_sse_task: asyncio.Task | None = None
@@ -169,28 +67,45 @@ async def project_worker(
             project = await Project.from_id(p_state.cfg.id)
             tasks = await fetch_project_tasks(project, limit=5)
 
-            # Update current branch dynamically if no fixed branch configured
             if not p_state.configured_branch:
                 p_state.branch = get_git_branch(repo_dir)
                 tag = f"{p_state.repo_name}:{p_state.branch}"
-                tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
+                tag_label = f"[bold cyan]\\\[{tag}\\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
 
             p_state.queue_count = len(read_queue(p_state.queue_file))
-            latest_task = tasks[0] if tasks else None
-            status_str = extract_status_str(getattr(latest_task, "status", "")) if latest_task else "IDLE"
-            task_id = extract_task_id(latest_task)
 
-            is_new_task = (task_id != p_state.current_task_id)
-            p_state.status = status_str
-            p_state.current_task_id = task_id
-            p_state.is_busy = bool(latest_task and status_str not in TERMINAL_STATUSES)
+            # Task resolution guarding against eventual consistency polling lags:
+            # If current task is running, don't fall back to older completed tasks if tasks[0] hasn't updated yet.
+            matching_task = next((t for t in tasks if extract_task_id(t) == p_state.current_task_id), None) if (p_state.is_busy and p_state.current_task_id) else None
 
-            if latest_task and (is_new_task or not p_state.prompt or status_str in TERMINAL_STATUSES):
-                info = await get_task_info(latest_task, task_id)
-                if info:
-                    p_state.prompt = info.prompt
-                    p_state.end_msg = info.end_msg or ""
-                    p_state.percent = info.percent
+            if matching_task:
+                latest_task = matching_task
+            elif p_state.is_busy and p_state.current_task_id:
+                try:
+                    latest_task = await AgentTask.from_id(p_state.current_task_id)
+                except Exception:
+                    latest_task = None
+            else:
+                latest_task = tasks[0] if tasks else None
+
+            if latest_task:
+                status_str = extract_status_str(getattr(latest_task, "status", ""))
+                task_id = extract_task_id(latest_task)
+                is_new_task = (task_id != p_state.current_task_id)
+
+                p_state.status = status_str
+                p_state.current_task_id = task_id
+                p_state.is_busy = status_str not in TERMINAL_STATUSES
+
+                if is_new_task or not p_state.prompt or status_str in TERMINAL_STATUSES:
+                    info = await get_task_info(latest_task, task_id)
+                    if info:
+                        p_state.prompt = info.prompt
+                        p_state.end_msg = info.end_msg or ""
+                        p_state.percent = info.percent
+            elif not p_state.is_busy:
+                status_str = "IDLE"
+                p_state.status = status_str
 
             render_event.set()
 
@@ -223,16 +138,24 @@ async def project_worker(
             ):
                 base_prompt = p_state.prompt or ""
                 cont_prompt = format_continuation_prompt(base_prompt)
-
                 ui_state.add_log(
-                    f"{tag_label} ⏳ [yellow]OUT OF BUDGET detected![/yellow] "
-                    f"Submitting continuation ({len(cont_prompt)} chars)..."
+                    f"{tag_label} ⏳ [yellow]OUT OF BUDGET detected![/yellow] Submitting continuation ({len(cont_prompt)} chars)..."
                 )
                 render_event.set()
 
-                new_task_id = await submit_prompt_to_project(
-                    project, p_state.cfg.id, cont_prompt
-                )
+                acc_lock = account_locks.setdefault(p_state.cfg.account, asyncio.Lock()) if account_locks is not None else None
+                if acc_lock:
+                    async with acc_lock:
+                        if is_account_busy(p_state.cfg.account, ui_state.projects, p_state.spec):
+                            new_task_id = None
+                        else:
+                            p_state.is_busy = True
+                            new_task_id = await submit_prompt_to_project(project, p_state.cfg.id, cont_prompt)
+                            if not new_task_id:
+                                p_state.is_busy = False
+                else:
+                    new_task_id = await submit_prompt_to_project(project, p_state.cfg.id, cont_prompt)
+
                 if new_task_id:
                     p_state.current_task_id = new_task_id
                     p_state.status = "RUNNING"
@@ -241,7 +164,7 @@ async def project_worker(
                     ui_state.add_log(f"{tag_label} 🚀 Continuation task {new_task_id[:8]} started!")
                     render_event.set()
 
-            # 3. Dispatch next queued task (ensures no other project under same account is busy)
+            # 3. Dispatch next queued task
             elif (
                 not p_state.is_busy
                 and p_state.cfg.watch_queue_and_send_messages
@@ -259,9 +182,13 @@ async def project_worker(
                             if is_account_busy(p_state.cfg.account, ui_state.projects, p_state.spec):
                                 new_task_id = None
                             else:
+                                p_state.is_busy = True
                                 new_task_id = await submit_prompt_to_project(project, p_state.cfg.id, top_prompt)
+                                if not new_task_id:
+                                    p_state.is_busy = False
                     else:
                         new_task_id = await submit_prompt_to_project(project, p_state.cfg.id, top_prompt)
+
                     if new_task_id:
                         if not p_state.cfg.queue_loop_first_message:
                             pop_top_message(p_state.queue_file, backlog_dir=backlog_dir)
@@ -336,42 +263,6 @@ async def key_listener(ui_state: UIState, render_event: asyncio.Event):
         render_event.set()
 
 
-class WatcherLock:
-    def __init__(self, lock_path: Path):
-        self.lock_path = lock_path
-        self._file = None
-
-    def acquire(self) -> bool:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(self.lock_path, "a+")
-        try:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self._file.seek(0)
-            self._file.truncate()
-            self._file.write(f"{os.getpid()}\n")
-            self._file.flush()
-            return True
-        except (BlockingIOError, OSError):
-            return False
-
-    def get_holder_pid(self) -> str | None:
-        try:
-            if self.lock_path.exists():
-                return self.lock_path.read_text(encoding="utf-8").strip() or None
-        except Exception:
-            pass
-        return None
-
-    def release(self):
-        if self._file:
-            try:
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-                self._file.close()
-            except Exception:
-                pass
-            self._file = None
-
-
 async def run_watcher(
     config_path: Path | None = None,
     queue_dir: Path | None = None,
@@ -386,6 +277,7 @@ async def run_watcher(
         pid_info = f" (PID: {holder_pid})" if holder_pid else ""
         console.print(f"[bold red]❌ Error: Another watch_branches daemon is already running{pid_info}.[/bold red]")
         sys.exit(1)
+
     resolved_queue_dir = (queue_dir or (resolved_cfg_path.parent / "queue")).resolve()
     resolved_backlog_dir = (backlog_dir or (resolved_cfg_path.parent / "queue_backlog")).resolve()
 
@@ -404,17 +296,16 @@ async def run_watcher(
             configured_branch=configured_branch,
         )
 
-    projects_state: list[ProjectState] = []
-    for spec, p_cfg in app_config.projects.items():
-        if filter_branch and not (spec.endswith(f":{filter_branch}") or spec == filter_branch):
-            continue
-        projects_state.append(create_project_state(spec, p_cfg))
+    projects_state: list[ProjectState] = [
+        create_project_state(spec, p_cfg)
+        for spec, p_cfg in app_config.projects.items()
+        if not filter_branch or (spec.endswith(f":{filter_branch}") or spec == filter_branch)
+    ]
 
     ui_state = UIState(projects_state, resolved_cfg_path, resolved_queue_dir)
     ui_state.add_log(f"[bold green]System initialized ({len(projects_state)} projects active). Starting workers...[/bold green]")
 
     render_event = asyncio.Event()
-
     account_locks: dict[str, asyncio.Lock] = {}
     worker_tasks: dict[str, asyncio.Task] = {
         p.spec: asyncio.create_task(
@@ -460,18 +351,9 @@ async def run_watcher(
                                     project_worker(new_p, app_config, resolved_queue_dir, resolved_backlog_dir, ui_state, render_event, account_locks=account_locks)
                                 )
 
-                            if projects_state:
-                                ui_state.selected_idx = min(ui_state.selected_idx, len(projects_state) - 1)
-                            else:
-                                ui_state.selected_idx = 0
-
-                            change_desc = []
-                            if removed_specs:
-                                change_desc.append(f"-{len(removed_specs)} removed")
-                            if added_specs:
-                                change_desc.append(f"+{len(added_specs)} added")
+                            ui_state.selected_idx = min(ui_state.selected_idx, max(0, len(projects_state) - 1))
+                            change_desc = (([f"-{len(removed_specs)} removed"] if removed_specs else []) + ([f"+{len(added_specs)} added"] if added_specs else []))
                             detail = f" ({', '.join(change_desc)})" if change_desc else ""
-
                             ui_state.add_log(f"[bold yellow]🔄 Config hot-reloaded: {len(projects_state)} active projects{detail}[/bold yellow]")
                             render_event.set()
                     except Exception as e:

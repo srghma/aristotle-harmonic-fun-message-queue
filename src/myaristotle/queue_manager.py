@@ -125,9 +125,20 @@ def write_queue(target: str | Path, queue_dir: Path | None, messages: list[str])
     tmp_file.replace(q_file)
 
 
+def get_backlog_file_path(target: str | Path, backlog_dir: Path) -> Path:
+    backlog_dir.mkdir(parents=True, exist_ok=True)
+    if isinstance(target, Path):
+        return backlog_dir / target.name
+    target_str = str(target).strip()
+    if target_str.endswith(".md"):
+        return backlog_dir / target_str
+    return backlog_dir / spec_to_queue_filename(target_str)
+
+
 def archive_to_backlog(target: str | Path, message: str, backlog_dir: Path) -> None:
-    existing_backlog = read_queue(target, backlog_dir)
-    write_queue(target, backlog_dir, [message] + existing_backlog)
+    b_file = get_backlog_file_path(target, backlog_dir)
+    existing_backlog = read_queue(b_file)
+    write_queue(b_file, None, [message] + existing_backlog)
 
 
 def peek_next_message(target: str | Path, queue_dir: Path | None = None) -> str | None:
