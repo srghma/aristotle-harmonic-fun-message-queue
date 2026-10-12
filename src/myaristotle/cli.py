@@ -74,6 +74,7 @@ import argparse
 import asyncio
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 from rich.console import Console

@@ -156,12 +156,21 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
         badge = status_badge(p.status, p.percent)
         task_str = p.current_task_id[:8] if p.current_task_id else "—"
 
+        account_busy = any(
+            other.is_busy and other.spec != p.spec
+            for other in state.projects
+            if other.cfg.account == p.cfg.account
+        )
+
         if not p.cfg.watch_queue_and_send_messages:
             queue_str = f"⏸ PAUSED ({p.queue_count})"
             queue_style = "yellow"
         elif p.cfg.queue_loop_first_message:
             queue_str = f"🔁 LOOP ({p.queue_count})"
             queue_style = "cyan"
+        elif account_busy and p.queue_count > 0:
+            queue_str = f"⏳ WAITING ({p.queue_count})"
+            queue_style = "yellow"
         else:
             queue_str = f"▶ ON ({p.queue_count})"
             queue_style = "green" if p.queue_count > 0 else "dim"

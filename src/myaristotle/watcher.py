@@ -138,6 +138,15 @@ async def sync_completed_task(
     return False
 
 
+def is_account_busy(account: str, projects: list[ProjectState], current_spec: str) -> bool:
+    """Checks if any other project under the same account is currently busy running a task."""
+    return any(
+        other.is_busy and other.spec != current_spec
+        for other in projects
+        if other.cfg.account == account
+    )
+
+
 async def project_worker(
     p_state: ProjectState,
     app_config: AppConfig,
@@ -145,6 +154,7 @@ async def project_worker(
     backlog_dir: Path,
     ui_state: UIState,
     render_event: asyncio.Event,
+    account_locks: dict[str, asyncio.Lock] | None = None,
 ):
     tag = f"{p_state.repo_name}:{p_state.branch}"
     tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
@@ -209,6 +219,7 @@ async def project_worker(
                 latest_task
                 and "OUT_OF_BUDGET" in status_str
                 and p_state.cfg.auto_continue_on_out_of_budget
+                and not is_account_busy(p_state.cfg.account, ui_state.projects, p_state.spec)
             ):
                 base_prompt = p_state.prompt or ""
                 cont_prompt = format_continuation_prompt(base_prompt)
@@ -230,17 +241,27 @@ async def project_worker(
                     ui_state.add_log(f"{tag_label} 🚀 Continuation task {new_task_id[:8]} started!")
                     render_event.set()
 
-            # 3. Dispatch next queued task
-            elif not p_state.is_busy and p_state.cfg.watch_queue_and_send_messages:
+            # 3. Dispatch next queued task (ensures no other project under same account is busy)
+            elif (
+                not p_state.is_busy
+                and p_state.cfg.watch_queue_and_send_messages
+                and not is_account_busy(p_state.cfg.account, ui_state.projects, p_state.spec)
+            ):
                 top_prompt = peek_next_message(p_state.queue_file)
                 if top_prompt:
                     ui_state.add_log(
                         f"{tag_label} 🚀 Aristotle is idle. Submitting top prompt ({len(top_prompt)} chars)..."
                     )
                     render_event.set()
-                    new_task_id = await submit_prompt_to_project(
-                        project, p_state.cfg.id, top_prompt
-                    )
+                    acc_lock = account_locks.setdefault(p_state.cfg.account, asyncio.Lock()) if account_locks is not None else None
+                    if acc_lock:
+                        async with acc_lock:
+                            if is_account_busy(p_state.cfg.account, ui_state.projects, p_state.spec):
+                                new_task_id = None
+                            else:
+                                new_task_id = await submit_prompt_to_project(project, p_state.cfg.id, top_prompt)
+                    else:
+                        new_task_id = await submit_prompt_to_project(project, p_state.cfg.id, top_prompt)
                     if new_task_id:
                         if not p_state.cfg.queue_loop_first_message:
                             pop_top_message(p_state.queue_file, backlog_dir=backlog_dir)
@@ -272,6 +293,11 @@ async def project_worker(
             break
         except Exception as e:
             err_msg = str(e).strip() or repr(e)
+            if "too many projects in progress" in err_msg.lower() or getattr(e, "status_code", None) == 429:
+                ui_state.add_log(f"{tag_label} ⏳ [yellow]Account '{p_state.cfg.account}' at capacity on Aristotle. Waiting for active task to finish...[/yellow]")
+                render_event.set()
+                await asyncio.sleep(10)
+                continue
             ui_state.add_log(f"{tag_label} [red]Error ({type(e).__name__}): {escape(err_msg)}[/red]")
             render_event.set()
             await asyncio.sleep(6)
@@ -389,9 +415,10 @@ async def run_watcher(
 
     render_event = asyncio.Event()
 
+    account_locks: dict[str, asyncio.Lock] = {}
     worker_tasks: dict[str, asyncio.Task] = {
         p.spec: asyncio.create_task(
-            project_worker(p, app_config, resolved_queue_dir, resolved_backlog_dir, ui_state, render_event)
+            project_worker(p, app_config, resolved_queue_dir, resolved_backlog_dir, ui_state, render_event, account_locks=account_locks)
         )
         for p in projects_state
     }
@@ -430,7 +457,7 @@ async def run_watcher(
                                 new_p = create_project_state(a_spec, reloaded_cfg.projects[a_spec])
                                 projects_state.append(new_p)
                                 worker_tasks[a_spec] = asyncio.create_task(
-                                    project_worker(new_p, app_config, resolved_queue_dir, resolved_backlog_dir, ui_state, render_event)
+                                    project_worker(new_p, app_config, resolved_queue_dir, resolved_backlog_dir, ui_state, render_event, account_locks=account_locks)
                                 )
 
                             if projects_state:
