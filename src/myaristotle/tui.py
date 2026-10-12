@@ -20,6 +20,9 @@ class ProjectState:
     repo_name: str
     branch: str
     cfg: ProjectConfig
+    repo_dir: Path = Path(".")
+    queue_file: Path = Path(".")
+    configured_branch: str | None = None
     status: str = "INITIALIZING"
     percent: int | None = None
     current_task_id: str | None = None
@@ -41,13 +44,20 @@ class UIState:
         self.last_reload = datetime.now()
         self.last_cfg_mtime = config_file.stat().st_mtime if config_file.exists() else 0.0
 
-    def select_next(self):
+    def select_next(self, step: int = 1):
         if self.projects:
-            self.selected_idx = (self.selected_idx + 1) % len(self.projects)
+            self.selected_idx = (self.selected_idx + step) % len(self.projects)
 
-    def select_prev(self):
+    def select_prev(self, step: int = 1):
         if self.projects:
-            self.selected_idx = (self.selected_idx - 1) % len(self.projects)
+            self.selected_idx = (self.selected_idx - step) % len(self.projects)
+
+    def jump_to_top(self):
+        self.selected_idx = 0
+
+    def jump_to_bottom(self):
+        if self.projects:
+            self.selected_idx = len(self.projects) - 1
 
     def toggle_expanded(self):
         self.is_expanded = not self.is_expanded
@@ -69,23 +79,44 @@ def format_short_text(text: str, max_chars: int = 90) -> str:
     return clean or "(none)"
 
 
+def calculate_visible_window(
+    selected_idx: int,
+    total_items: int,
+    max_visible: int,
+) -> tuple[int, int]:
+    """Calculates [start_idx, end_idx) window that keeps selected_idx centered."""
+    if total_items <= max_visible:
+        return 0, total_items
+    half = max_visible // 2
+    start = max(0, min(selected_idx - half, total_items - max_visible))
+    end = min(total_items, start + max_visible)
+    return start, end
+
+
 def render_tui(state: UIState, term_height: int = 30) -> Layout:
     layout = Layout()
+    total_projects = len(state.projects)
 
-    # Dynamic layout sizing
-    table_size = max(5, len(state.projects) + 4)
+    # Height allocation
+    # Header: 3, Footer: 1
+    # Inspector: 5 in collapsed, ratio 2 in expanded
+    # Logs: minimum 6 lines
     if state.is_expanded:
+        table_height = min(max(5, total_projects + 3), max(6, term_height // 3))
         layout.split_column(
             Layout(name="header", size=3),
-            Layout(name="table", size=table_size),
+            Layout(name="table", size=table_height),
             Layout(name="inspector", ratio=2),
             Layout(name="logs", ratio=1),
             Layout(name="footer", size=1),
         )
     else:
+        # Collapsed mode: give table reasonable room but ensure at least 8 lines for logs
+        max_table_lines = max(5, term_height - 3 - 1 - 5 - 8)
+        table_height = min(max(5, total_projects + 3), max_table_lines)
         layout.split_column(
             Layout(name="header", size=3),
-            Layout(name="table", size=table_size),
+            Layout(name="table", size=table_height),
             Layout(name="inspector", size=5),
             Layout(name="logs", ratio=1),
             Layout(name="footer", size=1),
@@ -100,25 +131,31 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
     )
     layout["header"].update(Panel(header_text, style="cyan", border_style="dim"))
 
-    # 2. Sticky Top Table
-    table = Table(box=None, expand=True, show_header=True, header_style="bold dim")
-    table.add_column("", width=3)
-    table.add_column("Repository : Branch", width=26)
-    table.add_column("Account", width=14)
-    table.add_column("Task ID", width=12)
-    table.add_column("Status", width=22)
-    table.add_column("Queue", width=14)
-    table.add_column("Policy", width=24)
+    # 2. Table with scrolling and scrollbar
+    visible_rows = max(2, table_height - 3)
+    start_idx, end_idx = calculate_visible_window(state.selected_idx, total_projects, visible_rows)
 
-    for idx, p in enumerate(state.projects):
-        is_sel = idx == state.selected_idx
+    table = Table(box=None, expand=True, show_header=True, header_style="bold dim")
+    table.add_column("", width=2, no_wrap=True)
+    table.add_column("Repository : Branch", style="bold", no_wrap=True)
+    table.add_column("Account", width=13, no_wrap=True)
+    table.add_column("Task ID", width=10, no_wrap=True)
+    table.add_column("Status", width=19, no_wrap=True)
+    table.add_column("Queue", width=14, no_wrap=True)
+    table.add_column("Policy", width=24, no_wrap=True)
+    table.add_column("", width=2, justify="right", no_wrap=True)
+
+    is_scrolling = total_projects > visible_rows
+
+    for rel_idx, p_idx in enumerate(range(start_idx, end_idx)):
+        p = state.projects[p_idx]
+        is_sel = p_idx == state.selected_idx
         cursor = "[bold cyan]❯[/bold cyan]" if is_sel else " "
         row_style = "bold white" if is_sel else ""
 
         badge = status_badge(p.status, p.percent)
         task_str = p.current_task_id[:8] if p.current_task_id else "—"
 
-        # Clear visual indicator of Queue state: ON vs PAUSED vs LOOP
         if not p.cfg.watch_queue_and_send_messages:
             queue_str = f"⏸ PAUSED ({p.queue_count})"
             queue_style = "yellow"
@@ -129,6 +166,18 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
             queue_str = f"▶ ON ({p.queue_count})"
             queue_style = "green" if p.queue_count > 0 else "dim"
 
+        # Scrollbar thumb
+        if is_scrolling:
+            thumb_start = int((start_idx / total_projects) * (end_idx - start_idx))
+            thumb_len = max(1, int(((end_idx - start_idx) / total_projects) * (end_idx - start_idx)))
+            thumb_end = thumb_start + thumb_len
+            if thumb_start <= rel_idx < thumb_end:
+                scroll_char = Text("█", style="bold cyan")
+            else:
+                scroll_char = Text("│", style="dim")
+        else:
+            scroll_char = Text("")
+
         table.add_row(
             cursor,
             Text(f"{p.repo_name}:{p.branch}", style=row_style),
@@ -137,9 +186,30 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
             badge,
             Text(queue_str, style=queue_style),
             Text(p.cfg.pull.value, style="dim"),
+            scroll_char,
         )
 
-    layout["table"].update(Panel(table, title="[bold]Projects Status[/bold]", border_style="cyan"))
+    if total_projects == 0:
+        table.add_row("", Text("(No projects configured)", style="dim italic"), "", "", "", "", "", "")
+
+    # Title & Subtitle with scroll info
+    if is_scrolling:
+        title = f"[bold]Projects Status[/bold] [cyan]({start_idx + 1}-{end_idx} of {total_projects})[/cyan]"
+        more_above = start_idx > 0
+        more_below = end_idx < total_projects
+        if more_above and more_below:
+            subtitle = f"[bold yellow]▲ {start_idx} above[/bold yellow]  •  [bold yellow]▼ {total_projects - end_idx} below[/bold yellow]"
+        elif more_above:
+            subtitle = f"[bold yellow]▲ {start_idx} more above[/bold yellow]"
+        elif more_below:
+            subtitle = f"[bold yellow]▼ {total_projects - end_idx} more below[/bold yellow]"
+        else:
+            subtitle = None
+    else:
+        title = f"[bold]Projects Status[/bold] [dim]({total_projects} total)[/dim]"
+        subtitle = None
+
+    layout["table"].update(Panel(table, title=title, subtitle=subtitle, border_style="cyan"))
 
     # 3. Selected Project Inspector
     cur = state.get_selected()
@@ -179,7 +249,7 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
             )
         layout["inspector"].update(insp_panel)
 
-    # 4. Logs (displays newest lines at the bottom, protected against markup errors)
+    # 4. Logs
     recent_logs = list(state.logs)[-max(5, term_height - 18):]
     log_group = []
     for line in recent_logs:
@@ -199,7 +269,7 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
     # 5. Footer Help
     layout["footer"].update(
         Text(
-            " [↑/k] Up  [↓/j] Down  [Enter/Space] Expand  [r] Refresh  [q/Ctrl+C] Quit",
+            " [↑/k] Up  [↓/j] Down  [g/G] Top/Bottom  [u/d] PageUp/Dn  [Enter] Expand  [r] Refresh  [q] Quit",
             style="bold white on #1f2024",
         )
     )

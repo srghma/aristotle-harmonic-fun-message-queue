@@ -8,6 +8,28 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def get_git_branch(cwd: Path) -> str:
+    try:
+        res = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        b = res.stdout.strip()
+        if not b:
+            res_ref = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+            )
+            b = res_ref.stdout.strip()
+        return b or "main"
+    except Exception:
+        return "main"
+
+
 def get_current_git_repo_and_branch(cwd: Path | None = None) -> tuple[Path | None, str | None]:
     target_cwd = (cwd or Path.cwd()).resolve()
     try:
@@ -20,26 +42,14 @@ def get_current_git_repo_and_branch(cwd: Path | None = None) -> tuple[Path | Non
         if res_root.returncode != 0:
             return None, None
         repo_root = Path(res_root.stdout.strip()).resolve()
-
-        res_branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            cwd=target_cwd,
-        )
-        branch = res_branch.stdout.strip() or None
+        branch = get_git_branch(repo_root)
         return repo_root, branch
     except Exception:
         return None, None
 
 
 def git_checkout(branch: str, cwd: Path) -> bool:
-    curr = subprocess.run(
-        ["git", "branch", "--show-current"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    ).stdout.strip()
+    curr = get_git_branch(cwd)
     if curr == branch:
         return True
 
@@ -146,9 +156,9 @@ def build_git_commit_message(task_id: str, status: str, prompt: str, end_msg: st
 
     return "\n".join(lines)
 
+
 def format_continuation_prompt(prev_prompt: str) -> str:
     clean = prev_prompt.strip() if prev_prompt else ""
-    # Strip any existing leading continuation prefixes
     clean = re.sub(
         r"^(continue\s+(with\s+)?previous\s+task\s*:\s*)+",
         "",

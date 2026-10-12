@@ -25,15 +25,21 @@ from .client import (
     stream_task_events,
     submit_prompt_to_project,
 )
-from .config import AppConfig, ProjectConfig, PullPolicy, load_config
+from .config import AppConfig, ProjectConfig, PullPolicy, load_config, resolve_project_dir_and_branch
 from .git_ops import (
     build_git_commit_message,
     format_continuation_prompt,
+    get_git_branch,
     git_checkout,
     git_commit_changes,
     is_task_in_git,
 )
-from .queue_manager import peek_next_message, pop_top_message, read_queue
+from .queue_manager import (
+    find_or_create_queue_file,
+    peek_next_message,
+    pop_top_message,
+    read_queue,
+)
 from .tui import ProjectState, UIState, render_tui
 
 console = Console()
@@ -59,8 +65,7 @@ async def monitor_task_sse(
     ui_state: UIState,
     render_event: asyncio.Event,
 ):
-    """Streams Server-Sent Events live without blocking the main worker loop."""
-    tag_label = f"[bold cyan]\\[{tag}][/bold cyan]"
+    tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan]"
     ui_state.add_log(f"{tag_label} 📡 Connected to live event stream for task {task_id[:8]}")
     render_event.set()
 
@@ -92,7 +97,7 @@ async def sync_completed_task(
     tag: str,
     ui_state: UIState,
 ) -> bool:
-    tag_label = f"[bold cyan]\\[{tag}][/bold cyan]"
+    tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan]"
     term_id = extract_task_id(task_obj)
     if not term_id:
         return False
@@ -111,8 +116,8 @@ async def sync_completed_task(
         return False
 
     ui_state.add_log(f"{tag_label} 📥 Downloading results for task {term_id[:8]}...")
-    if repo_dir.is_dir():
-        git_checkout(branch, cwd=repo_dir)
+    if repo_dir.is_dir() and t_cfg.configured_branch:
+        git_checkout(t_cfg.configured_branch, cwd=repo_dir)
 
     if execute_pull(project_id, api_key, t_cfg.sync_only_paths, cwd=repo_dir):
         if should_commit and repo_dir.is_dir():
@@ -139,13 +144,9 @@ async def project_worker(
     ui_state: UIState,
     render_event: asyncio.Event,
 ):
-    """Autonomous worker that polls project state every 4s and runs SSE non-blocking."""
     tag = f"{p_state.repo_name}:{p_state.branch}"
-    tag_label = f"[bold cyan]\\[{tag}][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
-
-    raw_spec = p_state.spec
-    path_part = raw_spec.rsplit(":", 1)[0] if ":" in raw_spec else raw_spec
-    repo_dir = Path(os.path.expandvars(os.path.expanduser(path_part.strip()))).resolve()
+    tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
+    repo_dir = p_state.repo_dir
 
     active_sse_task: asyncio.Task | None = None
     streamed_task_id: str | None = None
@@ -156,18 +157,22 @@ async def project_worker(
             project = await Project.from_id(p_state.cfg.id)
             tasks = await fetch_project_tasks(project, limit=5)
 
-            p_state.queue_count = len(read_queue(p_state.spec, queue_dir))
+            # Update current branch dynamically if no fixed branch configured
+            if not p_state.configured_branch:
+                p_state.branch = get_git_branch(repo_dir)
+                tag = f"{p_state.repo_name}:{p_state.branch}"
+                tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
+
+            p_state.queue_count = len(read_queue(p_state.queue_file))
             latest_task = tasks[0] if tasks else None
             status_str = extract_status_str(getattr(latest_task, "status", "")) if latest_task else "IDLE"
             task_id = extract_task_id(latest_task)
 
-            # Detect task change (e.g. new task submitted via Web UI or queue)
             is_new_task = (task_id != p_state.current_task_id)
             p_state.status = status_str
             p_state.current_task_id = task_id
             p_state.is_busy = bool(latest_task and status_str not in TERMINAL_STATUSES)
 
-            # Fetch prompt and end_msg whenever a new task is detected or when finished
             if latest_task and (is_new_task or not p_state.prompt or status_str in TERMINAL_STATUSES):
                 info = await get_task_info(latest_task, task_id)
                 if info:
@@ -179,18 +184,18 @@ async def project_worker(
 
             # 1. Sync finished task
             if latest_task and status_str in TERMINAL_STATUSES:
-                # Stop SSE stream for completed task
                 if active_sse_task and not active_sse_task.done():
                     active_sse_task.cancel()
                     active_sse_task = None
                     streamed_task_id = None
 
+                effective_branch = p_state.configured_branch or get_git_branch(repo_dir)
                 await sync_completed_task(
                     p_state.cfg.id,
                     latest_task,
                     p_state.cfg,
                     repo_dir,
-                    p_state.branch,
+                    effective_branch,
                     api_key,
                     tag,
                     ui_state,
@@ -223,9 +228,9 @@ async def project_worker(
                     ui_state.add_log(f"{tag_label} 🚀 Continuation task {new_task_id[:8]} started!")
                     render_event.set()
 
-            # 3. Dispatch next queued task (Only when truly idle and queue-watching enabled)
+            # 3. Dispatch next queued task
             elif not p_state.is_busy and p_state.cfg.watch_queue_and_send_messages:
-                top_prompt = peek_next_message(p_state.spec, queue_dir)
+                top_prompt = peek_next_message(p_state.queue_file)
                 if top_prompt:
                     ui_state.add_log(
                         f"{tag_label} 🚀 Aristotle is idle. Submitting top prompt ({len(top_prompt)} chars)..."
@@ -236,9 +241,9 @@ async def project_worker(
                     )
                     if new_task_id:
                         if not p_state.cfg.queue_loop_first_message:
-                            pop_top_message(p_state.spec, queue_dir, backlog_dir=backlog_dir)
+                            pop_top_message(p_state.queue_file, backlog_dir=backlog_dir)
 
-                        p_state.queue_count = len(read_queue(p_state.spec, queue_dir))
+                        p_state.queue_count = len(read_queue(p_state.queue_file))
                         p_state.current_task_id = new_task_id
                         p_state.status = "RUNNING"
                         p_state.is_busy = True
@@ -248,9 +253,8 @@ async def project_worker(
                         )
                         render_event.set()
 
-            # 4. Manage Non-Blocking SSE Streaming
+            # 4. SSE Streaming
             if p_state.is_busy and p_state.current_task_id:
-                # If current task is not being streamed, launch background SSE
                 if streamed_task_id != p_state.current_task_id:
                     if active_sse_task and not active_sse_task.done():
                         active_sse_task.cancel()
@@ -268,15 +272,13 @@ async def project_worker(
             err_msg = str(e).strip() or repr(e)
             ui_state.add_log(f"{tag_label} [red]Error ({type(e).__name__}): {escape(err_msg)}[/red]")
             render_event.set()
-            await asyncio.sleep(6)  # Pause to avoid spamming the resolver
+            await asyncio.sleep(6)
             continue
 
-        # Regular poll interval (4 seconds)
         await asyncio.sleep(4)
 
 
 async def key_listener(ui_state: UIState, render_event: asyncio.Event):
-    """Listens for user keys asynchronously without blocking."""
     loop = asyncio.get_running_loop()
     while not ui_state.stop_requested:
         k = await loop.run_in_executor(None, readchar.readkey)
@@ -284,6 +286,14 @@ async def key_listener(ui_state: UIState, render_event: asyncio.Event):
             ui_state.select_prev()
         elif k in (K.DOWN, "j", "J"):
             ui_state.select_next()
+        elif k in ("g", K.HOME):
+            ui_state.jump_to_top()
+        elif k in ("G", K.END):
+            ui_state.jump_to_bottom()
+        elif k in ("u", K.PAGE_UP):
+            ui_state.select_prev(step=5)
+        elif k in ("d", K.PAGE_DOWN):
+            ui_state.select_next(step=5)
         elif k in (K.ENTER, K.CR, " ", "e", "E"):
             ui_state.toggle_expanded()
         elif k in ("r", "R"):
@@ -310,16 +320,18 @@ async def run_watcher(
     resolved_backlog_dir = (backlog_dir or (resolved_cfg_path.parent / "queue_backlog")).resolve()
 
     def create_project_state(spec: str, p_cfg: ProjectConfig) -> ProjectState:
-        if ":" in spec:
-            p_part, b_part = spec.rsplit(":", 1)
-        else:
-            p_part, b_part = spec, "main"
-        r_name = Path(os.path.expandvars(os.path.expanduser(p_part))).name
+        repo_dir = p_cfg.resolved_dir or resolve_project_dir_and_branch(spec)[0]
+        configured_branch = p_cfg.configured_branch
+        curr_branch = configured_branch or get_git_branch(repo_dir)
+        queue_file = find_or_create_queue_file(repo_dir, curr_branch, resolved_queue_dir, spec=spec)
         return ProjectState(
             spec=spec,
-            repo_name=r_name,
-            branch=b_part.strip(),
+            repo_name=repo_dir.name,
+            branch=curr_branch,
             cfg=p_cfg,
+            repo_dir=repo_dir,
+            queue_file=queue_file,
+            configured_branch=configured_branch,
         )
 
     projects_state: list[ProjectState] = []
@@ -344,7 +356,6 @@ async def run_watcher(
     with Live(console=console, screen=True, auto_refresh=False) as live:
         try:
             while not ui_state.stop_requested:
-                # Hot-reload config.yaml on disk change
                 now = datetime.now()
                 if (now - ui_state.last_reload).total_seconds() >= 2:
                     ui_state.last_reload = now
@@ -358,7 +369,6 @@ async def run_watcher(
                             new_specs = set(reloaded_cfg.projects.keys())
                             old_specs = {p.spec for p in projects_state}
 
-                            # 1. Cancel and remove projects that were deleted or commented out
                             removed_specs = old_specs - new_specs
                             for r_spec in removed_specs:
                                 if r_spec in worker_tasks:
@@ -366,11 +376,9 @@ async def run_watcher(
                                     del worker_tasks[r_spec]
                             projects_state[:] = [p for p in projects_state if p.spec in new_specs]
 
-                            # 2. Update config for existing projects
                             for p in projects_state:
                                 p.cfg = reloaded_cfg.projects[p.spec]
 
-                            # 3. Add and spawn workers for newly added projects
                             added_specs = new_specs - old_specs
                             for a_spec in added_specs:
                                 if filter_branch and not (a_spec.endswith(f":{filter_branch}") or a_spec == filter_branch):
