@@ -21,3 +21,15 @@ def test_build_git_commit_message():
     assert "Task ID: 6ad53d96-a66b-4f9b-9787-563ecc92c6fa" in msg
     assert "=== My Prompt ===" in msg
     assert "=== Aristotle End Message ===" in msg
+
+
+def test_collect_rsync_excludes_with_extra(tmp_path):
+    from myaristotle.git_ops import collect_rsync_excludes_for_git
+    (tmp_path / ".gitignore").write_text("build/\n*.o\n# comment\n")
+    excludes = collect_rsync_excludes_for_git(tmp_path, extra_excludes=["*.typ", "# note", "extra.txt"])
+    assert "/.git/" in excludes
+    assert "build/" in excludes
+    assert "*.o" in excludes
+    assert "*.typ" in excludes
+    assert "extra.txt" in excludes
+    assert "# note" not in excludes

@@ -104,7 +104,7 @@ def is_task_in_git(task_id: str, branch: str | None = None, cwd: Path | None = N
         return False
 
 
-def collect_rsync_excludes_for_git(cwd: Path) -> list[str]:
+def collect_rsync_excludes_for_git(cwd: Path, extra_excludes: list[str] | None = None) -> list[str]:
     excludes = ["/.git/", "/.git", "/.gitignore", "/.gitattributes", "/.gitmodules"]
     root_gi = cwd / ".gitignore"
     if root_gi.is_file():
@@ -115,6 +115,11 @@ def collect_rsync_excludes_for_git(cwd: Path) -> list[str]:
                     excludes.append(clean)
         except Exception:
             pass
+    if extra_excludes:
+        for item in extra_excludes:
+            clean = item.strip()
+            if clean and not clean.startswith(("#", "!")) and clean not in excludes:
+                excludes.append(clean)
     return excludes
 
 

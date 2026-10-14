@@ -126,6 +126,7 @@ async def project_worker(
                     api_key,
                     tag,
                     ui_state,
+                    render_event=render_event,
                 )
                 render_event.set()
 

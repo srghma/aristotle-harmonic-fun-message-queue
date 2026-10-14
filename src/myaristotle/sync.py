@@ -69,6 +69,7 @@ async def sync_completed_task(
     api_key: str,
     tag: str,
     ui_state: UIState,
+    render_event: asyncio.Event | None = None,
 ) -> bool:
     tag_label = f"[bold cyan]\\[{tag}\\][/bold cyan]"
     term_id = extract_task_id(task_obj)
@@ -89,7 +90,21 @@ async def sync_completed_task(
     if repo_dir.is_dir() and t_cfg.configured_branch:
         git_checkout(t_cfg.configured_branch, cwd=repo_dir)
 
-    if execute_pull(project_id, api_key, t_cfg.sync_only_paths, cwd=repo_dir):
+    def _on_rsync_prog(line: str):
+        ui_state.add_log(f"{tag_label} 📥 {line}")
+        if render_event:
+            render_event.set()
+
+    pull_ok = await asyncio.to_thread(
+        execute_pull,
+        project_id,
+        api_key,
+        t_cfg.sync_only_paths,
+        cwd=repo_dir,
+        excludes=t_cfg.files_to_ignore,
+        on_progress=_on_rsync_prog,
+    )
+    if pull_ok:
         if should_commit and repo_dir.is_dir():
             msg = build_git_commit_message(task_info.task_id, task_info.status, task_info.prompt, task_info.end_msg)
             git_commit_changes(msg, push=should_push, cwd=repo_dir)

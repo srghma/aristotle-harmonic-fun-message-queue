@@ -115,3 +115,51 @@ def test_invalid_account_reference(tmp_path):
 
     with pytest.raises(ValueError, match="not defined in accounts"):
         load_config(cfg_file)
+
+
+def test_files_to_ignore_default_and_custom(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_API_KEY", "ak_123")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    cfg_data = {
+        "accounts": {"main": "${MY_API_KEY}"},
+        "files_to_ignore": ["*.typ", "notes/"],
+        "projects": {
+            str(repo): {
+                "id": "6ad53d96-a66b-4f9b-9787-563ecc92c6fa",
+                "account": "main",
+                "files_to_ignore": ["custom_local.txt"],
+            }
+        }
+    }
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(yaml.dump(cfg_data), encoding="utf-8")
+
+    app_cfg, _ = load_config(cfg_file)
+    assert app_cfg.files_to_ignore == ["*.typ", "notes/"]
+    proj = app_cfg.projects[str(repo)]
+    assert proj.files_to_ignore == ["*.typ", "notes/", "custom_local.txt"]
+
+
+def test_files_to_ignore_default_empty_when_not_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_API_KEY", "ak_123")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    cfg_data = {
+        "accounts": {"main": "${MY_API_KEY}"},
+        "projects": {
+            str(repo): {
+                "id": "6ad53d96-a66b-4f9b-9787-563ecc92c6fa",
+                "account": "main",
+            }
+        }
+    }
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(yaml.dump(cfg_data), encoding="utf-8")
+
+    app_cfg, _ = load_config(cfg_file)
+    assert app_cfg.files_to_ignore == []
+    proj = app_cfg.projects[str(repo)]
+    assert proj.files_to_ignore == []

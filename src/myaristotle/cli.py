@@ -192,7 +192,14 @@ def main():
 
         api_key = setup_auth_for_account(p_cfg.account, cfg)
         paths = args.paths if args.paths else p_cfg.sync_only_paths
-        execute_pull(p_cfg.id, api_key, paths=paths, cwd=repo_root)
+        execute_pull(
+            p_cfg.id,
+            api_key,
+            paths=paths,
+            cwd=repo_root,
+            excludes=p_cfg.files_to_ignore,
+            on_progress=lambda p: console.print(f"[dim]Sync: {p}[/dim]"),
+        )
 
     elif args.command == "task_to_git_message":
         cfg, _ = load_config(args.config)

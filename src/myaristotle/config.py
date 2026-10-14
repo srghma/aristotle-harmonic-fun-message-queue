@@ -82,11 +82,22 @@ def resolve_project_dir_and_branch(
     )
 
 
+def _parse_ignore_list(v: Any) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [line.strip() for line in v.splitlines() if line.strip()]
+    if isinstance(v, list):
+        return [str(item).strip() for item in v if str(item).strip()]
+    return list(v)
+
+
 class ProjectConfig(BaseModel):
     id: str
     account: str
     pull: PullPolicy = PullPolicy.PULL_AND_COMMIT_AND_PUSH
     sync_only_paths: list[str] = Field(default_factory=list)
+    files_to_ignore: list[str] = Field(default_factory=list)
     watch_queue_and_send_messages: bool = False
     auto_continue_on_out_of_budget: bool = True
     queue_loop_first_message: bool = False
@@ -110,10 +121,23 @@ class ProjectConfig(BaseModel):
                 return p
         return PullPolicy.PULL_AND_COMMIT_AND_PUSH
 
+    @field_validator("files_to_ignore", mode="before")
+    @classmethod
+    def _coerce_files_to_ignore(cls, v: Any) -> list[str]:
+        return _parse_ignore_list(v)
+
 
 class AppConfig(BaseModel):
     accounts: dict[str, str] = Field(default_factory=dict)
+    files_to_ignore: list[str] = Field(default_factory=list)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
+
+    @field_validator("files_to_ignore", mode="before")
+    @classmethod
+    def _coerce_global_files_to_ignore(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        return _parse_ignore_list(v)
 
     def get_api_key_for_account(self, account_name: str) -> str | None:
         raw_key = self.accounts.get(account_name)
@@ -148,7 +172,7 @@ def load_config(config_path: Path | None = None) -> tuple[AppConfig, Path]:
     data = yaml.safe_load(expanded_text) or {}
     config = AppConfig.model_validate(data)
 
-    # Validate accounts and directory existence
+    # Validate accounts and directory existence, and merge global files_to_ignore
     for proj_spec, p_cfg in config.projects.items():
         if p_cfg.account not in config.accounts:
             raise ValueError(
@@ -158,5 +182,7 @@ def load_config(config_path: Path | None = None) -> tuple[AppConfig, Path]:
         repo_dir, configured_branch = resolve_project_dir_and_branch(proj_spec)
         p_cfg.resolved_dir = repo_dir
         p_cfg.configured_branch = configured_branch
+        # Merge global files_to_ignore with per-project ignores (deduplicating, preserving order)
+        p_cfg.files_to_ignore = list(dict.fromkeys(config.files_to_ignore + p_cfg.files_to_ignore))
 
     return config, path
