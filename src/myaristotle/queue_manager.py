@@ -2,6 +2,34 @@ import os
 from pathlib import Path
 import re
 
+from .queue_backlog import (
+    archive_to_backlog,
+    deduplicate_all_backlogs,
+    deduplicate_backlog_file,
+    deduplicate_messages,
+    get_backlog_file_path,
+)
+
+__all__ = [
+    "spec_to_queue_filename",
+    "queue_filename_to_spec",
+    "get_canonical_queue_path",
+    "find_or_create_queue_file",
+    "get_queue_file_path",
+    "parse_queue_messages",
+    "format_queue_messages",
+    "read_queue",
+    "write_queue",
+    "peek_next_message",
+    "pop_top_message",
+    "pop_next_message",
+    "get_backlog_file_path",
+    "archive_to_backlog",
+    "deduplicate_messages",
+    "deduplicate_backlog_file",
+    "deduplicate_all_backlogs",
+]
+
 
 def spec_to_queue_filename(spec: str) -> str:
     """Simplifies spec into clean filename, stripping ~/projects/ and replacing / with |."""
@@ -22,7 +50,6 @@ def get_canonical_queue_path(
     queue_dir: Path,
     spec: str | None = None,
 ) -> Path:
-    # If spec is provided, prefer its cleaned filename
     if spec:
         filename = spec_to_queue_filename(spec)
     elif branch and branch != "main":
@@ -40,24 +67,20 @@ def find_or_create_queue_file(
 ) -> Path:
     queue_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Check exact simplified filename from spec
     if spec:
         spec_file = queue_dir / spec_to_queue_filename(spec)
         if spec_file.exists():
             return spec_file
 
-    # 2. Check repo.md
     simple_file = queue_dir / f"{repo_dir.name}.md"
     if simple_file.exists():
         return simple_file
 
-    # 3. Check repo:branch.md
     if branch:
         branch_file = queue_dir / f"{repo_dir.name}:{branch}.md"
         if branch_file.exists():
             return branch_file
 
-    # 4. Check legacy ~|projects| patterns
     legacy_patterns = [
         f"~|projects|{repo_dir.name}.md",
         f"~|projects|{repo_dir.name}:{branch}.md" if branch else None,
@@ -66,7 +89,6 @@ def find_or_create_queue_file(
         if lp and (queue_dir / lp).exists():
             return queue_dir / lp
 
-    # Fallback: create simplified file
     canonical = get_canonical_queue_path(repo_dir, branch, queue_dir, spec=spec)
     canonical.touch()
     return canonical
@@ -125,28 +147,16 @@ def write_queue(target: str | Path, queue_dir: Path | None, messages: list[str])
     tmp_file.replace(q_file)
 
 
-def get_backlog_file_path(target: str | Path, backlog_dir: Path) -> Path:
-    backlog_dir.mkdir(parents=True, exist_ok=True)
-    if isinstance(target, Path):
-        return backlog_dir / target.name
-    target_str = str(target).strip()
-    if target_str.endswith(".md"):
-        return backlog_dir / target_str
-    return backlog_dir / spec_to_queue_filename(target_str)
-
-
-def archive_to_backlog(target: str | Path, message: str, backlog_dir: Path) -> None:
-    b_file = get_backlog_file_path(target, backlog_dir)
-    existing_backlog = read_queue(b_file)
-    write_queue(b_file, None, [message] + existing_backlog)
-
-
 def peek_next_message(target: str | Path, queue_dir: Path | None = None) -> str | None:
     messages = read_queue(target, queue_dir)
     return messages[0] if messages else None
 
 
-def pop_top_message(target: str | Path, queue_dir: Path | None = None, backlog_dir: Path | None = None) -> str | None:
+def pop_top_message(
+    target: str | Path,
+    queue_dir: Path | None = None,
+    backlog_dir: Path | None = None,
+) -> str | None:
     messages = read_queue(target, queue_dir)
     if not messages:
         return None

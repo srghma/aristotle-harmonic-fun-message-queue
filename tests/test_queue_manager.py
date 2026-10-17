@@ -1,4 +1,7 @@
 from myaristotle.queue_manager import (
+    archive_to_backlog,
+    deduplicate_all_backlogs,
+    deduplicate_messages,
     format_queue_messages,
     parse_queue_messages,
     pop_next_message,
@@ -84,14 +87,54 @@ def test_pop_and_archive_to_backlog(tmp_path):
     assert read_queue(spec, backlog_dir) == ["Task B", "Task A"]
 
 
-def test_pop_and_archive_to_backlog_with_path(tmp_path):
-    queue_dir = tmp_path / "queue"
+def test_archive_skips_when_same_as_prev(tmp_path):
     backlog_dir = tmp_path / "queue_backlog"
-    queue_file = queue_dir / "clean.md"
+    spec = "leanscript:main"
 
-    write_queue(queue_file, None, ["Task 1", "Task 2"])
+    # 1. Add Task 1
+    added1 = archive_to_backlog(spec, "Task 1", backlog_dir)
+    assert added1 is True
+    assert read_queue(spec, backlog_dir) == ["Task 1"]
 
-    popped = pop_top_message(queue_file, backlog_dir=backlog_dir)
-    assert popped == "Task 1"
-    assert read_queue(queue_file) == ["Task 2"]
-    assert read_queue(backlog_dir / "clean.md") == ["Task 1"]
+    # 2. Add Task 1 again -> should NOT be added
+    added2 = archive_to_backlog(spec, "Task 1", backlog_dir)
+    assert added2 is False
+    assert read_queue(spec, backlog_dir) == ["Task 1"]
+
+    # 3. Add Task 2 -> added to top
+    added3 = archive_to_backlog(spec, "Task 2", backlog_dir)
+    assert added3 is True
+    assert read_queue(spec, backlog_dir) == ["Task 2", "Task 1"]
+
+    # 4. Add Task 2 again -> skipped
+    added4 = archive_to_backlog(spec, "Task 2", backlog_dir)
+    assert added4 is False
+    assert read_queue(spec, backlog_dir) == ["Task 2", "Task 1"]
+
+
+def test_archive_cleans_existing_duplicates(tmp_path):
+    backlog_dir = tmp_path / "queue_backlog"
+    spec = "repo:main"
+
+    # Pre-populate backlog file with existing consecutive duplicates
+    b_file = backlog_dir / "repo:main.md"
+    write_queue(b_file, None, ["Old Task", "Old Task", "Older Task", "Older Task"])
+
+    # Archiving a new task cleans existing duplicates and prepends new task
+    archive_to_backlog(spec, "New Task", backlog_dir)
+    assert read_queue(spec, backlog_dir) == ["New Task", "Old Task", "Older Task"]
+
+
+def test_deduplicate_all_backlogs(tmp_path):
+    backlog_dir = tmp_path / "queue_backlog"
+    backlog_dir.mkdir(parents=True)
+
+    f1 = backlog_dir / "repo1.md"
+    f2 = backlog_dir / "repo2.md"
+    write_queue(f1, None, ["A", "A", "B", "B"])
+    write_queue(f2, None, ["X", "Y", "Z"])
+
+    stats = deduplicate_all_backlogs(backlog_dir)
+    assert stats == {"repo1.md": 2}
+    assert read_queue(f1) == ["A", "B"]
+    assert read_queue(f2) == ["X", "Y", "Z"]
