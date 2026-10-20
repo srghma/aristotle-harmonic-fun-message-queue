@@ -163,3 +163,47 @@ def test_files_to_ignore_default_empty_when_not_set(tmp_path, monkeypatch):
     assert app_cfg.files_to_ignore == []
     proj = app_cfg.projects[str(repo)]
     assert proj.files_to_ignore == []
+
+
+def test_hibernate_after_queues_of_all_exhausted_valid(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_API_KEY", "ak_123")
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    cfg_data = {
+        "accounts": {"main": "${MY_API_KEY}"},
+        "hibernate_after_queues_of_all_exhausted": ["myrepo"],
+        "projects": {
+            str(repo): {
+                "id": "6ad53d96-a66b-4f9b-9787-563ecc92c6fa",
+                "account": "main",
+            }
+        }
+    }
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(yaml.dump(cfg_data), encoding="utf-8")
+
+    app_cfg, _ = load_config(cfg_file)
+    assert app_cfg.hibernate_after_queues_of_all_exhausted == ["myrepo"]
+
+
+def test_hibernate_after_queues_of_all_exhausted_invalid_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_API_KEY", "ak_123")
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    cfg_data = {
+        "accounts": {"main": "${MY_API_KEY}"},
+        "hibernate_after_queues_of_all_exhausted": ["non_existent_project"],
+        "projects": {
+            str(repo): {
+                "id": "6ad53d96-a66b-4f9b-9787-563ecc92c6fa",
+                "account": "main",
+            }
+        }
+    }
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(yaml.dump(cfg_data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="hibernate_after_queues_of_all_exhausted references unknown project"):
+        load_config(cfg_file)

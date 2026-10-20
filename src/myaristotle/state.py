@@ -22,6 +22,8 @@ class ProjectState:
     end_msg: str = ""
     queue_count: int = 0
     is_busy: bool = False
+    is_syncing: bool = False
+    has_initialized: bool = False
 
 
 class UIState:
@@ -35,6 +37,17 @@ class UIState:
         self.queue_dir = queue_dir
         self.last_reload = datetime.now()
         self.last_cfg_mtime = config_file.stat().st_mtime if config_file.exists() else 0.0
+        self.hibernate_targets: list[str] = []
+        self.hibernate_triggered: bool = False
+        self.hibernate_cancelled: bool = False
+        self.hibernate_countdown_start: datetime | None = None
+        self.hibernate_countdown_seconds: int = 15
+
+    def get_hibernate_countdown_remaining(self) -> int | None:
+        if self.hibernate_countdown_start is None:
+            return None
+        elapsed = (datetime.now() - self.hibernate_countdown_start).total_seconds()
+        return max(0, int(self.hibernate_countdown_seconds - elapsed))
 
     def select_next(self, step: int = 1):
         if self.projects:

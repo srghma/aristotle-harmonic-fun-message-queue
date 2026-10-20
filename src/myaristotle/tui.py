@@ -47,9 +47,21 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
     # 1. Header
     cfg_name = state.config_file.name
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hib_suffix = ""
+    if state.hibernate_targets:
+        rem = state.get_hibernate_countdown_remaining()
+        if state.hibernate_cancelled:
+            hib_suffix = " [dim]• 💤 Hibernate cancelled[/dim]"
+        elif state.hibernate_triggered:
+            hib_suffix = " [green]• 💤 Hibernated[/green]"
+        elif rem is not None:
+            hib_suffix = f" [bold red blink]• 💤 Hibernating in {rem}s ('c' to cancel)[/bold red blink]"
+        else:
+            hib_suffix = f" [yellow]• 💤 Hibernate on {len(state.hibernate_targets)} target(s) idle[/yellow]"
+
     header_text = Text.from_markup(
         f" [bold magenta]🧠 Aristotle Multi-Repository Watcher[/bold magenta] "
-        f"[dim]• Config: {cfg_name} • {now_str}[/dim]"
+        f"[dim]• Config: {cfg_name} • {now_str}[/dim]{hib_suffix}"
     )
     layout["header"].update(Panel(header_text, style="cyan", border_style="dim"))
 
@@ -109,9 +121,15 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
         else:
             scroll_char = Text("")
 
+        is_hib_target = any(
+            t.strip() in (p.spec, p.repo_name, f"{p.repo_name}:{p.branch}")
+            for t in state.hibernate_targets
+        )
+        repo_display = f"💤 {p.repo_name}:{p.branch}" if is_hib_target else f"{p.repo_name}:{p.branch}"
+
         table.add_row(
             cursor,
-            Text(f"{p.repo_name}:{p.branch}", style=row_style),
+            Text(repo_display, style=row_style),
             Text(p.cfg.account, style="dim"),
             Text(task_str, style="cyan" if p.current_task_id else "dim"),
             badge,
@@ -198,9 +216,10 @@ def render_tui(state: UIState, term_height: int = 30) -> Layout:
     )
 
     # 5. Footer Help
+    hib_footer = "  [c] Cancel Hibernate" if (state.hibernate_targets and not state.hibernate_cancelled) else ""
     layout["footer"].update(
         Text(
-            " [↑/k] Up  [↓/j] Down  [g/G] Top/Bottom  [u/d] PageUp/Dn  [Enter] Expand  [r] Refresh  [q] Quit",
+            f" [↑/k] Up  [↓/j] Down  [g/G] Top/Bottom  [u/d] PageUp/Dn  [Enter] Expand  [r] Refresh{hib_footer}  [q] Quit",
             style="bold white on #1f2024",
         )
     )

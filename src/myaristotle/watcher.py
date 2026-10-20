@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,30 @@ from .tui import render_tui
 console = Console()
 
 
+
+def project_matches_hibernate_target(p: ProjectState, target: str) -> bool:
+    clean = target.strip()
+    return clean in (p.spec, p.repo_name, f"{p.repo_name}:{p.branch}")
+
+
+def check_hibernate_condition(targets: list[str], projects: list[ProjectState]) -> bool:
+    if not targets or not projects:
+        return False
+
+    return all(
+        (matched := [p for p in projects if project_matches_hibernate_target(p, target)])
+        and all(
+            p.has_initialized
+            and not p.is_busy
+            and not p.is_syncing
+            and p.queue_count == 0
+            and ("OUT_OF_BUDGET" not in p.status or not p.cfg.auto_continue_on_out_of_budget)
+            and (p.status in TERMINAL_STATUSES or p.status == "IDLE")
+            for p in matched
+        )
+        for target in targets
+    )
+
 def is_account_busy(account: str, projects: list[ProjectState], current_spec: str) -> bool:
     """Checks if any other project under the same account is currently busy running a task."""
     return any(
@@ -55,7 +81,7 @@ async def project_worker(
     account_locks: dict[str, asyncio.Lock] | None = None,
 ):
     tag = f"{p_state.repo_name}:{p_state.branch}"
-    tag_label = f"[bold cyan]\\\[{tag}\\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
+    tag_label = fr"[bold cyan]\[{tag}\] [/bold cyan][dim]({p_state.cfg.account})[/dim]"
     repo_dir = p_state.repo_dir
 
     active_sse_task: asyncio.Task | None = None
@@ -70,7 +96,7 @@ async def project_worker(
             if not p_state.configured_branch:
                 p_state.branch = get_git_branch(repo_dir)
                 tag = f"{p_state.repo_name}:{p_state.branch}"
-                tag_label = f"[bold cyan]\\\[{tag}\\\][/bold cyan] [dim]({p_state.cfg.account})[/dim]"
+                tag_label = fr"[bold cyan]\[{tag}\] [/bold cyan][dim]({p_state.cfg.account})[/dim]"
 
             p_state.queue_count = len(read_queue(p_state.queue_file))
 
@@ -107,6 +133,7 @@ async def project_worker(
                 status_str = "IDLE"
                 p_state.status = status_str
 
+            p_state.has_initialized = True
             render_event.set()
 
             # 1. Sync finished task
@@ -117,17 +144,21 @@ async def project_worker(
                     streamed_task_id = None
 
                 effective_branch = p_state.configured_branch or get_git_branch(repo_dir)
-                await sync_completed_task(
-                    p_state.cfg.id,
-                    latest_task,
-                    p_state.cfg,
-                    repo_dir,
-                    effective_branch,
-                    api_key,
-                    tag,
-                    ui_state,
-                    render_event=render_event,
-                )
+                p_state.is_syncing = True
+                try:
+                    await sync_completed_task(
+                        p_state.cfg.id,
+                        latest_task,
+                        p_state.cfg,
+                        repo_dir,
+                        effective_branch,
+                        api_key,
+                        tag,
+                        ui_state,
+                        render_event=render_event,
+                    )
+                finally:
+                    p_state.is_syncing = False
                 render_event.set()
 
             # 2. AUTO-RECOVERY: Handle OUT_OF_BUDGET
@@ -252,8 +283,18 @@ async def key_listener(ui_state: UIState, render_event: asyncio.Event):
             ui_state.select_next(step=5)
         elif k in (K.ENTER, K.CR, " ", "e", "E"):
             ui_state.toggle_expanded()
+        elif k in ("c", "C"):
+            if ui_state.hibernate_targets and not ui_state.hibernate_cancelled:
+                ui_state.hibernate_cancelled = True
+                ui_state.hibernate_countdown_start = None
+                ui_state.add_log("[bold yellow]🛑 Auto-hibernate CANCELLED by user (press 'r' to re-arm).[/bold yellow]")
         elif k in ("r", "R"):
-            ui_state.add_log("[dim]Manual refresh requested.[/dim]")
+            if ui_state.hibernate_cancelled:
+                ui_state.hibernate_cancelled = False
+                ui_state.hibernate_triggered = False
+                ui_state.add_log("[dim]Auto-hibernate re-armed.[/dim]")
+            else:
+                ui_state.add_log("[dim]Manual refresh requested.[/dim]")
         elif k in ("q", "Q", K.CTRL_C, K.CTRL_D):
             ui_state.stop_requested = True
             render_event.set()
@@ -304,6 +345,7 @@ async def run_watcher(
     ]
 
     ui_state = UIState(projects_state, resolved_cfg_path, resolved_queue_dir)
+    ui_state.hibernate_targets = list(app_config.hibernate_after_queues_of_all_exhausted)
     ui_state.add_log(f"[bold green]System initialized ({len(projects_state)} projects active). Starting workers...[/bold green]")
 
     render_event = asyncio.Event()
@@ -341,6 +383,10 @@ async def run_watcher(
 
                             for p in projects_state:
                                 p.cfg = reloaded_cfg.projects[p.spec]
+                            if ui_state.hibernate_targets != reloaded_cfg.hibernate_after_queues_of_all_exhausted:
+                                ui_state.hibernate_targets = list(reloaded_cfg.hibernate_after_queues_of_all_exhausted)
+                                ui_state.hibernate_cancelled = False
+                                ui_state.hibernate_triggered = False
 
                             added_specs = new_specs - old_specs
                             for a_spec in added_specs:
@@ -359,6 +405,46 @@ async def run_watcher(
                             render_event.set()
                     except Exception as e:
                         ui_state.add_log(f"[red]Config reload error: {escape(str(e))}[/red]")
+
+                # Hibernate check
+                if (
+                    ui_state.hibernate_targets
+                    and not ui_state.hibernate_triggered
+                    and not ui_state.hibernate_cancelled
+                ):
+                    all_exhausted = check_hibernate_condition(ui_state.hibernate_targets, ui_state.projects)
+                    if all_exhausted:
+                        if ui_state.hibernate_countdown_start is None:
+                            ui_state.hibernate_countdown_start = datetime.now()
+                            targets_str = ", ".join(ui_state.hibernate_targets)
+                            ui_state.add_log(
+                                f"[bold yellow]💤 Queues exhausted for: {targets_str}. "
+                                f"Hibernating in {ui_state.hibernate_countdown_seconds}s (press 'c' to cancel)...[/bold yellow]"
+                            )
+                            render_event.set()
+                        else:
+                            rem = ui_state.get_hibernate_countdown_remaining()
+                            if rem is not None and rem <= 0:
+                                ui_state.hibernate_triggered = True
+                                ui_state.hibernate_countdown_start = None
+                                ui_state.add_log("[bold magenta]💤 System hibernating now via systemctl hibernate...[/bold magenta]")
+                                render_event.set()
+                                live.update(render_tui(ui_state, console.size.height), refresh=True)
+                                systemctl_bin = shutil.which("systemctl") or "/run/current-system/sw/bin/systemctl"
+                                try:
+                                    res = subprocess.run([systemctl_bin, "hibernate"], capture_output=True, text=True)
+                                    if res.returncode != 0:
+                                        ui_state.add_log(f"[bold red]❌ systemctl hibernate failed (code {res.returncode}): {escape(res.stderr.strip())}[/bold red]")
+                                    else:
+                                        ui_state.add_log("[bold green]💤 System resumed from hibernate.[/bold green]")
+                                except Exception as e:
+                                    ui_state.add_log(f"[bold red]❌ systemctl hibernate execution error: {escape(str(e))}[/bold red]")
+                                render_event.set()
+                    else:
+                        if ui_state.hibernate_countdown_start is not None:
+                            ui_state.hibernate_countdown_start = None
+                            ui_state.add_log("[yellow]Hibernate countdown aborted: active task or non-empty queue detected.[/yellow]")
+                            render_event.set()
 
                 live.update(render_tui(ui_state, console.size.height), refresh=True)
                 try:

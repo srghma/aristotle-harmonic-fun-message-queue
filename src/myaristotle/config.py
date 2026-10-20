@@ -130,11 +130,19 @@ class ProjectConfig(BaseModel):
 class AppConfig(BaseModel):
     accounts: dict[str, str] = Field(default_factory=dict)
     files_to_ignore: list[str] = Field(default_factory=list)
+    hibernate_after_queues_of_all_exhausted: list[str] = Field(default_factory=list)
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
 
     @field_validator("files_to_ignore", mode="before")
     @classmethod
     def _coerce_global_files_to_ignore(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        return _parse_ignore_list(v)
+
+    @field_validator("hibernate_after_queues_of_all_exhausted", mode="before")
+    @classmethod
+    def _coerce_hibernate_after_queues(cls, v: Any) -> list[str]:
         if v is None:
             return []
         return _parse_ignore_list(v)
@@ -184,5 +192,19 @@ def load_config(config_path: Path | None = None) -> tuple[AppConfig, Path]:
         p_cfg.configured_branch = configured_branch
         # Merge global files_to_ignore with per-project ignores (deduplicating, preserving order)
         p_cfg.files_to_ignore = list(dict.fromkeys(config.files_to_ignore + p_cfg.files_to_ignore))
+
+    # Validate hibernate_after_queues_of_all_exhausted targets
+    for target in config.hibernate_after_queues_of_all_exhausted:
+        matches = any(
+            target == spec
+            or (p_cfg.resolved_dir and target == p_cfg.resolved_dir.name)
+            or (p_cfg.resolved_dir and f"{p_cfg.resolved_dir.name}:{p_cfg.configured_branch}" == target)
+            for spec, p_cfg in config.projects.items()
+        )
+        if not matches:
+            raise ValueError(
+                f"hibernate_after_queues_of_all_exhausted references unknown project '{target}', "
+                f"which is not defined in projects: {list(config.projects.keys())}"
+            )
 
     return config, path
