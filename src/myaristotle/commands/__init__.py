@@ -1,4 +1,4 @@
-from . import browser, git_msg, pull, queue, status, submit, watch
+from . import browser, carapace, git_msg, pull, queue, status, submit, watch
 
 COMMAND_MODULES = [
     watch,
@@ -8,4 +8,5 @@ COMMAND_MODULES = [
     queue,
     browser,
     submit,
+    carapace,
 ]

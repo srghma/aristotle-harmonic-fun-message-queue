@@ -1,6 +1,6 @@
 import argparse
 
-from .commands import COMMAND_MODULES
+from .commands import COMMAND_MODULES, carapace
 from .commands.common import RichHelpFormatter
 
 
@@ -12,7 +12,10 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     for cmd_module in COMMAND_MODULES:
-        cmd_module.register(subparsers)
+        if cmd_module is carapace:
+            cmd_module.register(subparsers, parser)
+        else:
+            cmd_module.register(subparsers)
 
     return parser
 
@@ -20,6 +23,7 @@ def create_parser() -> argparse.ArgumentParser:
 def main():
     parser = create_parser()
     args = parser.parse_args()
+
     if hasattr(args, "func"):
         args.func(args)
     else:
