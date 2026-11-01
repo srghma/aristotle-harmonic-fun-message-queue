@@ -24,7 +24,10 @@ build-backend = "hatchling.build"
 packages = ["src/myaristotle"]
 
 [dependency-groups]
-dev = ["pytest>=8.0.0"]
+dev = [
+    "pytest>=8.0.0",
+    # "editables>=0.6"
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

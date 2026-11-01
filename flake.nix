@@ -62,6 +62,14 @@
             nixpkgs.lib.composeManyExtensions [
               pyproject-build-systems.overlays.wheel
               overlay
+
+              (final: prev: {
+                myaristotle = prev.myaristotle.overrideAttrs (old: {
+                  nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+                    final.editables
+                  ];
+                });
+              })
             ]
           );
         in
